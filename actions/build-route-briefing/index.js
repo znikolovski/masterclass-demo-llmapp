@@ -11,6 +11,7 @@
 // per-route stage/permit/hazard detail (BRIEFING_DETAIL) is editorial narrative
 // keyed by adventure_id and stays local until published to the attributes sheet.
 const { loadAdventures } = require('../lib/wknd.js');
+const { withAnalytics } = require('../lib/analytics.js');
 
 const MOCK_DATA = [
   { adventure_id: 'patagonia-trek', name: 'W Circuit: 9 Days, 115 km', title: 'W Circuit: 9 Days, 115 km', description: 'A full field account of the W Circuit in Torres del Paine — permit strategy, daily stage breakdowns, and refugio conditions.', image_url: 'https://wknd-adventures.run.place/media_1e4b49be43a70d306b1c312d0d78dd369b5ccce40.jpg?width=1200&format=pjpg&optimize=medium', category: 'Hiking', activity: 'Hiking', landscape: 'Mountains', region: 'Americas', destination: 'Torres del Paine', country: 'Chile', experience_level: 'Advanced', pace: 'Endurance', priority: 'Physical challenge', trip_length_days: 9, duration: '9 days · 115 km', verified_status: 'Verified · February 2026', match_reason: 'A demanding multi-day mountain expedition for experienced parties who want documented permit and stage detail.' },
@@ -111,7 +112,7 @@ function buildBriefing(report) {
   };
 }
 
-module.exports = async (args, extra) => {
+const handler = async (args, extra) => {
   const {
     adventure_id = '',
     travel_window = '',
@@ -167,3 +168,5 @@ module.exports = async (args, extra) => {
     structuredContent: briefing,
   };
 };
+
+module.exports = withAnalytics('build_route_briefing', handler);

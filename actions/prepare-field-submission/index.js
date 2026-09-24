@@ -5,6 +5,7 @@
 // tool *prepares* a package for editorial review rather than submitting it, and the
 // B2B forms are contact/interest forms, not an editorial-submission schema.
 const { loadAdventures } = require('../lib/wknd.js');
+const { withAnalytics } = require('../lib/analytics.js');
 
 const MOCK_DATA = [
   { adventure_id: 'patagonia-trek', name: 'W Circuit: 9 Days, 115 km', title: 'W Circuit: 9 Days, 115 km', description: 'A full field account of the W Circuit in Torres del Paine — permit strategy, daily stage breakdowns, and refugio conditions.', image_url: 'https://wknd-adventures.run.place/media_1e4b49be43a70d306b1c312d0d78dd369b5ccce40.jpg?width=1200&format=pjpg&optimize=medium', category: 'Hiking', activity: 'Hiking', landscape: 'Mountains', region: 'Americas', destination: 'Torres del Paine', country: 'Chile', experience_level: 'Advanced', pace: 'Endurance', priority: 'Physical challenge', trip_length_days: 9, duration: '9 days · 115 km', verified_status: 'Verified · February 2026', match_reason: 'A demanding multi-day mountain expedition for experienced parties who want documented permit and stage detail.' },
@@ -72,7 +73,7 @@ function buildSections(type) {
   }
 }
 
-module.exports = async ({
+const handler = async ({
   submission_type = '',
   draft_text = '',
   destination = '',
@@ -186,6 +187,8 @@ module.exports = async ({
     },
   };
 };
+
+module.exports = withAnalytics('prepare_field_submission', handler);
 
 /*
  * TODO: Replace MOCK_DATA with a real API call.

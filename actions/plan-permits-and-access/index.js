@@ -5,6 +5,7 @@
 // MOCK_DATA is the offline fallback for the route lookup. Detail arrays stay empty
 // until the sheet/flights supply real data, so every return branch keeps its shape.
 const { loadAdventures, loadAttributes, searchFlights } = require('../lib/wknd.js');
+const { withAnalytics } = require('../lib/analytics.js');
 
 const MOCK_DATA = [
     {
@@ -196,7 +197,7 @@ const EMPTY_PLAN = {
     source_verification: null,
 };
 
-module.exports = async ({ adventure_id = '', travel_window = '', origin = '', trip_style = '' } = {}, extra) => {
+const handler = async ({ adventure_id = '', travel_window = '', origin = '', trip_style = '' } = {}, extra) => {
     if (!adventure_id || typeof adventure_id !== 'string' || !adventure_id.trim()) {
         return {
             content: [{ type: 'text', text: 'Please provide an adventure_id (a WKND route or destination) to plan permits and access for.' }],
@@ -288,6 +289,8 @@ module.exports = async ({ adventure_id = '', travel_window = '', origin = '', tr
         },
     };
 };
+
+module.exports = withAnalytics('plan_permits_and_access', handler);
 
 /*
  * TODO: Replace MOCK_DATA with a real API call.

@@ -4,6 +4,7 @@
 // still a representative audit — a genuine item-level computation from `items` is the
 // remaining follow-up (see the note below the handler).
 const { loadAdventures } = require('../lib/wknd.js');
+const { withAnalytics } = require('../lib/analytics.js');
 
 const MOCK_DATA = [
   { adventure_id: 'patagonia-trek', name: 'W Circuit: 9 Days, 115 km', title: 'W Circuit: 9 Days, 115 km', description: 'A full field account of the W Circuit in Torres del Paine — permit strategy, daily stage breakdowns, and refugio conditions.', image_url: 'https://wknd-adventures.run.place/media_1e4b49be43a70d306b1c312d0d78dd369b5ccce40.jpg?width=1200&format=pjpg&optimize=medium', category: 'Hiking', activity: 'Hiking', landscape: 'Mountains', region: 'Americas', destination: 'Torres del Paine', country: 'Chile', experience_level: 'Advanced', pace: 'Endurance', priority: 'Physical challenge', trip_length_days: 9, duration: '9 days · 115 km', verified_status: 'Verified · February 2026', match_reason: 'A demanding multi-day mountain expedition for experienced parties who want documented permit and stage detail.' },
@@ -63,7 +64,7 @@ const EMPTY_AUDIT = {
   assumptions: [],
 };
 
-module.exports = async ({
+const handler = async ({
   items = [],
   adventure_id = '',
   activity = '',
@@ -127,6 +128,8 @@ module.exports = async ({
     },
   };
 };
+
+module.exports = withAnalytics('audit_pack_weight', handler);
 
 /*
  * TODO: Replace MOCK_AUDIT/MOCK_DATA with a real audit computation + API call.

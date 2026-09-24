@@ -2,6 +2,7 @@
 // WKND catalogue (EDS query-index + Aero catalog) via actions/lib/wknd.js; MOCK_DATA
 // is the offline fallback. See the note below the handler.
 const { loadAdventures } = require('../lib/wknd.js');
+const { withAnalytics } = require('../lib/analytics.js');
 
 const MOCK_DATA = [
     { adventure_id: 'patagonia-trek', name: 'W Circuit: 9 Days, 115 km', activity: 'Hiking', landscape: 'Mountains', destination: 'Torres del Paine', country: 'Chile', experience_level: 'Advanced', trip_length_days: 9, duration: '9 days · 115 km', verified_status: 'Verified · February 2026' },
@@ -40,7 +41,7 @@ function isWet(conditions) {
     return /wet|rain|precip|storm|damp|humid|monsoon/.test(s);
 }
 
-module.exports = async ({
+const handler = async ({
     adventure_id = '',
     activity = '',
     terrain = '',
@@ -204,6 +205,8 @@ module.exports = async ({
         },
     };
 };
+
+module.exports = withAnalytics('build_gear_checklist', handler);
 
 /*
  * TODO: Replace MOCK_DATA with a real API call.
