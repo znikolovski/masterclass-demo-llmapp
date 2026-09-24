@@ -1,4 +1,7 @@
-const { withAnalytics, sendMcpAnalyticsEvent, readAnalyticsConfig } = require('../../actions/lib/analytics.js');
+const {
+  withAnalytics, sendMcpAnalyticsEvent, readAnalyticsConfig,
+  FALLBACK_DATASTREAM_ID, FALLBACK_ORG_ID, FALLBACK_XDM_TENANT,
+} = require('../../actions/lib/analytics.js');
 
 const CONFIGURED_EXTRA = {
   variables: {
@@ -9,13 +12,29 @@ const CONFIGURED_EXTRA = {
 };
 
 describe('readAnalyticsConfig', () => {
-  test('returns null when unconfigured', () => {
-    expect(readAnalyticsConfig(undefined)).toBeNull();
-    expect(readAnalyticsConfig({ variables: {} })).toBeNull();
+  // TEMP: the LLM Apps UI has no way to add these variables yet, so an unset
+  // variable falls back to a hardcoded value (see FALLBACK_* in analytics.js)
+  // instead of disabling sending. Revert these two cases to "returns null"
+  // once the UI supports variables and the fallback is removed.
+  test('falls back to hardcoded values when unconfigured', () => {
+    expect(readAnalyticsConfig(undefined)).toEqual({
+      datastreamId: FALLBACK_DATASTREAM_ID,
+      orgId: FALLBACK_ORG_ID,
+      xdmTenant: FALLBACK_XDM_TENANT,
+    });
+    expect(readAnalyticsConfig({ variables: {} })).toEqual({
+      datastreamId: FALLBACK_DATASTREAM_ID,
+      orgId: FALLBACK_ORG_ID,
+      xdmTenant: FALLBACK_XDM_TENANT,
+    });
   });
 
-  test('returns null when only some variables are set', () => {
-    expect(readAnalyticsConfig({ variables: { WKND_ANALYTICS_DATASTREAM_ID: 'ds-123' } })).toBeNull();
+  test('fills only the missing pieces from the fallback when partially set', () => {
+    expect(readAnalyticsConfig({ variables: { WKND_ANALYTICS_DATASTREAM_ID: 'ds-123' } })).toEqual({
+      datastreamId: 'ds-123',
+      orgId: FALLBACK_ORG_ID,
+      xdmTenant: FALLBACK_XDM_TENANT,
+    });
   });
 
   test('returns the config when fully set', () => {
@@ -38,9 +57,13 @@ describe('sendMcpAnalyticsEvent', () => {
     fetchSpy.mockRestore();
   });
 
-  test('does not call fetch when unconfigured', async () => {
+  // TEMP: falls back to hardcoded config (see readAnalyticsConfig), so this
+  // now sends under the fallback datastream rather than no-op'ing.
+  test('still calls fetch when unconfigured, using the fallback datastream', async () => {
     await sendMcpAnalyticsEvent(undefined, { toolName: 'discover_adventures', mcpMethod: 'tools/call', status: 'ok' });
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url] = fetchSpy.mock.calls[0];
+    expect(url).toBe(`https://edge.adobedc.net/ee/v2/interact?dataStreamId=${FALLBACK_DATASTREAM_ID}`);
   });
 
   test('posts the full field set to the Edge interact endpoint under the configured tenant', async () => {
@@ -142,10 +165,13 @@ describe('withAnalytics', () => {
     expect(body.event.xdm.wkndmcp.mcp.errorClass).toBe('TypeError');
   });
 
-  test('is a no-op analytics-wise when unconfigured, and still works with no extra at all', async () => {
+  // TEMP: falls back to hardcoded config when unconfigured (see readAnalyticsConfig),
+  // so this now still sends rather than no-op'ing — the handler contract itself
+  // (works fine with no `extra` at all) is what this test actually guards.
+  test('still works with no extra at all, sending under the fallback config', async () => {
     const handler = jest.fn(async () => ({ content: [], structuredContent: {} }));
     const wrapped = withAnalytics('x', handler);
     await expect(wrapped({ a: 1 })).resolves.toEqual({ content: [], structuredContent: {} });
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });

@@ -34,10 +34,21 @@
  *   WKND_ANALYTICS_ORG_ID        — required; IMS org (e.g. 28260E2056581D3B7F000101@AdobeOrg)
  *   WKND_ANALYTICS_XDM_TENANT    — required; tenant id owning the custom field group
  * Missing any of these disables sending entirely (fail-soft, never blocks a tool call).
+ *
+ * TEMPORARY: the LLM Apps UI currently has no way to add these variables for
+ * this app, so the values are hardcoded below as a fallback until that's
+ * available. None of the three are secret (datastream ID and IMS org ID are
+ * already public in any client-side Web SDK network request), so this is a
+ * maintainability shortcut, not a credential leak. Revert to variables-only
+ * (delete the FALLBACK_* constants and the `||` below) once the UI supports it.
  */
 
 const FETCH_TIMEOUT_MS = 3000;
 const EDGE_INTERACT_HOST = 'edge.adobedc.net';
+
+const FALLBACK_DATASTREAM_ID = '56dee4fc-21a9-4e37-83ab-bdd874957aba';
+const FALLBACK_ORG_ID = '28260E2056581D3B7F000101@AdobeOrg';
+const FALLBACK_XDM_TENANT = 'ags050';
 
 function getVar(extra, name) {
   const v = extra && extra.variables && extra.variables[name];
@@ -46,9 +57,9 @@ function getVar(extra, name) {
 
 /** @param {object} [extra] handler `extra` arg @returns {{datastreamId:string,orgId:string,xdmTenant:string}|null} */
 function readAnalyticsConfig(extra) {
-  const datastreamId = getVar(extra, 'WKND_ANALYTICS_DATASTREAM_ID');
-  const orgId = getVar(extra, 'WKND_ANALYTICS_ORG_ID');
-  const xdmTenant = getVar(extra, 'WKND_ANALYTICS_XDM_TENANT');
+  const datastreamId = getVar(extra, 'WKND_ANALYTICS_DATASTREAM_ID') || FALLBACK_DATASTREAM_ID;
+  const orgId = getVar(extra, 'WKND_ANALYTICS_ORG_ID') || FALLBACK_ORG_ID;
+  const xdmTenant = getVar(extra, 'WKND_ANALYTICS_XDM_TENANT') || FALLBACK_XDM_TENANT;
   if (!datastreamId || !orgId || !xdmTenant) return null;
   return { datastreamId, orgId, xdmTenant };
 }
@@ -141,13 +152,22 @@ async function sendMcpAnalyticsEvent(extra, fields) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    await fetch(url, {
+    const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ event: { xdm } }),
       signal: controller.signal,
     });
-  } catch {
+    // TEMP DEBUG — remove once processing-rule mapping is confirmed working.
+    if (!response.ok) {
+      const body = await response.text().catch(() => '<unreadable body>');
+      console.error('[analytics] edge interact rejected', response.status, body);
+    } else {
+      console.log('[analytics] edge interact accepted', response.status);
+    }
+  } catch (err) {
+    // TEMP DEBUG — remove once processing-rule mapping is confirmed working.
+    console.error('[analytics] edge interact request failed', err && err.message);
     // fail-soft — analytics must never affect the tool call
   } finally {
     clearTimeout(timer);
@@ -200,5 +220,10 @@ function withAnalytics(toolName, handler) {
 }
 
 module.exports = {
-  withAnalytics, sendMcpAnalyticsEvent, readAnalyticsConfig,
+  withAnalytics,
+  sendMcpAnalyticsEvent,
+  readAnalyticsConfig,
+  FALLBACK_DATASTREAM_ID,
+  FALLBACK_ORG_ID,
+  FALLBACK_XDM_TENANT,
 };
