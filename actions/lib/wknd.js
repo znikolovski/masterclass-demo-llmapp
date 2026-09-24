@@ -21,7 +21,10 @@
 const DEFAULTS = {
   WKND_CATALOG_BASE: 'https://wknd-aero-api.jaggah.workers.dev',
   WKND_B2B_BASE: 'https://wknd-b2b-api.jaggah.workers.dev',
-  WKND_EDS_BASE: 'https://main--masterclass-demo--znikolovski.aem.live',
+  // The public production domain, not the internal `main--<repo>--<org>.aem.live`
+  // alias: widget hosts (ChatGPT/Claude) enforce a CSP image/connect domain
+  // allowlist declared in the LLM Apps UI, and only this domain is on it.
+  WKND_EDS_BASE: 'https://wknd-adventures.run.place',
 };
 
 const FETCH_TIMEOUT_MS = 6000;
@@ -60,6 +63,19 @@ async function fetchJson(url) {
 
 const norm = (v) => (typeof v === 'string' ? v.trim() : '');
 const isSet = (v) => norm(v).length > 0 && norm(v).toLowerCase() !== 'null' && norm(v).toLowerCase() !== 'undefined';
+
+// The Aero catalog worker syncs from the internal aem.live alias and bakes it into
+// `images[].url` / `editorialUrl`, which the widget host's CSP does not allow —
+// rewrite it to the configured production EDS base so those links/images resolve.
+const INTERNAL_EDS_HOST = 'main--masterclass-demo--znikolovski.aem.live';
+function toProdUrl(url, edsBase) {
+  if (!isSet(url) || !url.includes(INTERNAL_EDS_HOST)) return url;
+  try {
+    return url.replace(INTERNAL_EDS_HOST, new URL(edsBase).host);
+  } catch {
+    return url;
+  }
+}
 
 // The EDS query-index `title` is the page's SEO <title>/og:title, which carries a
 // trailing brand suffix (e.g. "W Circuit: 9 Days, 115 km — WKND Adventures"). Strip
@@ -121,11 +137,11 @@ function applyIndexRow(rec, row, base) {
 }
 
 /** merge an Aero catalog entity (commerce fields) into a record */
-function applyCatalogEntity(rec, e) {
+function applyCatalogEntity(rec, e, edsBase) {
   if (isSet(e.name)) { rec.title = rec.title || e.name; rec.name = rec.name || e.name; }
   if (isSet(e.description) && !isSet(rec.description)) rec.description = e.description;
   if (Array.isArray(e.images) && e.images[0] && isSet(e.images[0].url) && !isSet(rec.image_url)) {
-    rec.image_url = e.images[0].url;
+    rec.image_url = toProdUrl(e.images[0].url, edsBase);
   }
   if (e.price && Number.isFinite(Number(e.price.final))) {
     rec.price = { currency: e.price.currency || 'USD', final: Number(e.price.final) };
@@ -137,7 +153,7 @@ function applyCatalogEntity(rec, e) {
       rec.activity = CATEGORY_ACTIVITY[norm(e.adventureCategory).toLowerCase()] || norm(e.adventureCategory);
     }
   }
-  if (isSet(e.editorialUrl)) rec.editorial_url = e.editorialUrl;
+  if (isSet(e.editorialUrl)) rec.editorial_url = toProdUrl(e.editorialUrl, edsBase);
 }
 
 /**
@@ -179,7 +195,7 @@ async function loadAdventures(extra, mockData = []) {
       const id = norm(e.sku);
       if (!id) continue;
       const rec = byId.get(id) || { adventure_id: id };
-      applyCatalogEntity(rec, e);
+      applyCatalogEntity(rec, e, edsBase);
       byId.set(id, rec);
     }
 
