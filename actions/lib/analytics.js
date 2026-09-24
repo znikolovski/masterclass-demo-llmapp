@@ -61,6 +61,21 @@ function safeSize(value) {
   }
 }
 
+// Caps a string to N utf8 bytes without splitting a multi-byte character —
+// matches the runtime's own userIntent truncation (see USER_INTENT_EXTRA_KEY
+// handling in loader.js) so an unusually long value can't get rejected by a
+// schema field's max-length constraint.
+function truncateUtf8Bytes(value, maxBytes) {
+  if (typeof value !== 'string') return undefined;
+  let bytes = Buffer.byteLength(value, 'utf8');
+  let out = value;
+  while (bytes > maxBytes) {
+    out = out.slice(0, -1);
+    bytes = Buffer.byteLength(out, 'utf8');
+  }
+  return out || undefined;
+}
+
 // ChatGPT-only today — see module doc above.
 function hostSessionFromExtra(extra) {
   const v = extra && extra._meta && extra._meta['openai/session'];
@@ -100,7 +115,8 @@ async function sendMcpAnalyticsEvent(extra, fields) {
   if (Number.isFinite(durationMs)) mcp.durationMs = durationMs;
   if (Number.isFinite(inputSize)) mcp.inputSizeBytes = inputSize;
   if (Number.isFinite(outputSize)) mcp.outputSizeBytes = outputSize;
-  if (userIntent) mcp.userIntent = userIntent;
+  const truncatedUserIntent = truncateUtf8Bytes(userIntent, 255);
+  if (truncatedUserIntent) mcp.userIntent = truncatedUserIntent;
 
   // A plain field, not just identityMap: identityMap drives identity stitching,
   // not Analytics dimensions — the session-ID eVar mapping needs a normal path.
