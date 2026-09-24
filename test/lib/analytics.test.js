@@ -84,18 +84,20 @@ describe('sendMcpAnalyticsEvent', () => {
     expect(errBody.event.xdm.wkndmcp.mcp.status).toBe('error');
   });
 
-  test('includes MCPHOSTUSER identity from openai/session, absent otherwise', async () => {
+  test('includes hostSession as both a plain field and MCPHOSTUSER identity, absent otherwise', async () => {
     await sendMcpAnalyticsEvent(
       { ...CONFIGURED_EXTRA, _meta: { 'openai/session': 'sess-abc' } },
       { toolName: 'x', mcpMethod: 'tools/call', status: 'ok', durationMs: 1, inputSize: 1, outputSize: 1 },
     );
     const withSession = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(withSession.event.xdm.wkndmcp.mcp.hostSession).toBe('sess-abc');
     expect(withSession.event.xdm.identityMap).toEqual({
       MCPHOSTUSER: [{ id: 'sess-abc', authenticatedState: 'ambiguous', primary: true }],
     });
 
     await sendMcpAnalyticsEvent(CONFIGURED_EXTRA, { toolName: 'x', mcpMethod: 'tools/call', status: 'ok', durationMs: 1, inputSize: 1, outputSize: 1 });
     const withoutSession = JSON.parse(fetchSpy.mock.calls[1][1].body);
+    expect(withoutSession.event.xdm.wkndmcp.mcp.hostSession).toBeUndefined();
     expect(withoutSession.event.xdm.identityMap).toBeUndefined();
   });
 

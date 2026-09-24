@@ -102,6 +102,11 @@ async function sendMcpAnalyticsEvent(extra, fields) {
   if (Number.isFinite(outputSize)) mcp.outputSizeBytes = outputSize;
   if (userIntent) mcp.userIntent = userIntent;
 
+  // A plain field, not just identityMap: identityMap drives identity stitching,
+  // not Analytics dimensions — the session-ID eVar mapping needs a normal path.
+  const hostSession = hostSessionFromExtra(extra);
+  if (hostSession) mcp.hostSession = hostSession;
+
   const xdm = {
     eventType: 'mcp.tool_call',
     timestamp: new Date().toISOString(),
@@ -112,7 +117,6 @@ async function sendMcpAnalyticsEvent(extra, fields) {
     [cfg.xdmTenant]: { mcp },
   };
 
-  const hostSession = hostSessionFromExtra(extra);
   if (hostSession) {
     xdm.identityMap = { MCPHOSTUSER: [{ id: hostSession, authenticatedState: 'ambiguous', primary: true }] };
   }
