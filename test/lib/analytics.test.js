@@ -97,10 +97,10 @@ describe('sendMcpAnalyticsEvent', () => {
       userIntent: 'Plan a trip',
     });
 
-    // Direct Analytics variable mapping (data.__adobe.analytics) — bypasses
+    // Direct Analytics variable mapping (flat data object) — bypasses
     // processing rules. toolName is NOT re-keyed here; it maps to Page Name
     // via xdm.web.webPageDetails.name instead (asserted above).
-    expect(body.event.data.__adobe.analytics).toEqual({
+    expect(body.event.data).toEqual({
       eVar10: 'tools/call',
       eVar12: 'ok',
       eVar14: '28260E2056581D3B7F000101@AdobeOrg',
@@ -116,8 +116,8 @@ describe('sendMcpAnalyticsEvent', () => {
     const errBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
     expect(errBody.event.xdm.wkndmcp.mcp.errorClass).toBe('TypeError');
     expect(errBody.event.xdm.wkndmcp.mcp.status).toBe('error');
-    expect(errBody.event.data.__adobe.analytics.eVar13).toBe('TypeError');
-    expect(errBody.event.data.__adobe.analytics.eVar12).toBe('error');
+    expect(errBody.event.data.eVar13).toBe('TypeError');
+    expect(errBody.event.data.eVar12).toBe('error');
   });
 
   test('includes hostSession as both a plain field and MCPHOSTUSER identity, absent otherwise', async () => {
@@ -130,13 +130,13 @@ describe('sendMcpAnalyticsEvent', () => {
     expect(withSession.event.xdm.identityMap).toEqual({
       MCPHOSTUSER: [{ id: 'sess-abc', authenticatedState: 'ambiguous', primary: true }],
     });
-    expect(withSession.event.data.__adobe.analytics.eVar11).toBe('sess-abc');
+    expect(withSession.event.data.eVar11).toBe('sess-abc');
 
     await sendMcpAnalyticsEvent(CONFIGURED_EXTRA, { toolName: 'x', mcpMethod: 'tools/call', status: 'ok', durationMs: 1, inputSize: 1, outputSize: 1 });
     const withoutSession = JSON.parse(fetchSpy.mock.calls[1][1].body);
     expect(withoutSession.event.xdm.wkndmcp.mcp.hostSession).toBeUndefined();
     expect(withoutSession.event.xdm.identityMap).toBeUndefined();
-    expect(withoutSession.event.data.__adobe.analytics.eVar11).toBeUndefined();
+    expect(withoutSession.event.data.eVar11).toBeUndefined();
   });
 
   test('never throws when the request fails', async () => {

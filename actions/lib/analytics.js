@@ -178,7 +178,13 @@ async function sendMcpAnalyticsEvent(extra, fields) {
   if (Number.isFinite(mcp.outputSizeBytes)) eventPairs.push(`event24=${mcp.outputSizeBytes}`);
   if (eventPairs.length) analyticsVars.events = eventPairs.join(',');
 
-  const data = { __adobe: { analytics: analyticsVars } };
+  // Flat, no __adobe.analytics wrapper: that nesting is a Web SDK (alloy.js)
+  // client-side abstraction the library itself flattens before making the
+  // HTTP call — Adobe's raw interact-endpoint reference shows `data` fields
+  // (e.g. prop1) as direct children with no wrapper, and this module calls
+  // /ee/v2/interact directly (bypassing the Web SDK), so it must match that
+  // wire format rather than the SDK-level one.
+  const data = analyticsVars;
 
   const url = `https://${EDGE_INTERACT_HOST}/ee/v2/interact?dataStreamId=${encodeURIComponent(cfg.datastreamId)}`;
   const controller = new AbortController();
