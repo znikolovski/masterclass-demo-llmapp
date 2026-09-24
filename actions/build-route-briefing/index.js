@@ -6,7 +6,12 @@
 // `item = _result?.structuredContent || {}`, so every return path must be a plain
 // object with the same field shape — `{}` on not-found / missing input.
 
-// Route catalog. Verbatim samplePayload — real scraped WKND report cards.
+// Route catalogue. Real data is loaded from the WKND catalogue (EDS query-index +
+// Aero catalog) via actions/lib/wknd.js; MOCK_DATA is the offline fallback. The
+// per-route stage/permit/hazard detail (BRIEFING_DETAIL) is editorial narrative
+// keyed by adventure_id and stays local until published to the attributes sheet.
+const { loadAdventures } = require('../lib/wknd.js');
+
 const MOCK_DATA = [
   { adventure_id: 'patagonia-trek', name: 'W Circuit: 9 Days, 115 km', title: 'W Circuit: 9 Days, 115 km', description: 'A full field account of the W Circuit in Torres del Paine — permit strategy, daily stage breakdowns, and refugio conditions.', image_url: 'https://wknd-adventures.run.place/media_1e4b49be43a70d306b1c312d0d78dd369b5ccce40.jpg?width=1200&format=pjpg&optimize=medium', category: 'Hiking', activity: 'Hiking', landscape: 'Mountains', region: 'Americas', destination: 'Torres del Paine', country: 'Chile', experience_level: 'Advanced', pace: 'Endurance', priority: 'Physical challenge', trip_length_days: 9, duration: '9 days · 115 km', verified_status: 'Verified · February 2026', match_reason: 'A demanding multi-day mountain expedition for experienced parties who want documented permit and stage detail.' },
   { adventure_id: 'kayaking-norway', name: 'Lofoten Islands: Arctic Surfing at the Top of the World', title: 'Lofoten Islands: Arctic Surfing at the Top of the World', description: "Seven days surfing between the Lofoten peaks — cold-water preparation, swell windows, and why Unstad produces some of Europe's best Arctic waves.", image_url: 'https://wknd-adventures.run.place/media_1bd10685af4f3d38127de55d4da60d4ef86518b8d.jpg?width=1200&format=pjpg&optimize=medium', category: 'Surfing', activity: 'Surfing', landscape: 'Coast', region: 'Europe', destination: 'Lofoten Islands', country: 'Norway', experience_level: 'Advanced', pace: 'Adrenaline', priority: 'Solitude', trip_length_days: 7, duration: '7 days', verified_status: 'Verified · November 2025', match_reason: 'Cold-water surf expedition for confident surfers comfortable in serious neoprene and remote conditions.' },
@@ -64,14 +69,14 @@ const BRIEFING_DETAIL = {
   },
 };
 
-function findReport(query) {
+function findReport(catalog, query) {
   const q = String(query).trim().toLowerCase();
   if (!q) return null;
-  let match = MOCK_DATA.find((r) => r.adventure_id.toLowerCase() === q
+  let match = catalog.find((r) => r.adventure_id.toLowerCase() === q
     || (r.title && r.title.toLowerCase() === q)
     || (r.name && r.name.toLowerCase() === q));
   if (!match) {
-    match = MOCK_DATA.find((r) => r.adventure_id.toLowerCase().includes(q)
+    match = catalog.find((r) => r.adventure_id.toLowerCase().includes(q)
       || (r.title && r.title.toLowerCase().includes(q))
       || (r.name && r.name.toLowerCase().includes(q)));
   }
@@ -106,7 +111,7 @@ function buildBriefing(report) {
   };
 }
 
-module.exports = async (args) => {
+module.exports = async (args, extra) => {
   const {
     adventure_id = '',
     travel_window = '',
@@ -121,13 +126,11 @@ module.exports = async (args) => {
     };
   }
 
-  // TODO: replace this MOCK_DATA lookup with the real WKND report API.
-  //   const res = await fetch(`${process.env.API_BASE_URL}/reports/${encodeURIComponent(adventure_id)}`, {
-  //     headers: { Authorization: `Bearer ${process.env.API_KEY}` },
-  //   });
-  //   const report = await res.json();
-  // Never hardcode secrets or an external base URL — read from process.env.
-  const report = findReport(adventure_id);
+  // Resolve the route from the real WKND catalogue (EDS query-index + Aero catalog),
+  // falling back to MOCK_DATA if the upstreams are unreachable. The narrative stage
+  // detail is applied from BRIEFING_DETAIL by adventure_id in buildBriefing().
+  const catalog = await loadAdventures(extra, MOCK_DATA);
+  const report = findReport(catalog, adventure_id);
 
   if (!report) {
     return {

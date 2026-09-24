@@ -1,5 +1,8 @@
-// TODO: Replace MOCK_DATA with a real API call.
-// See the TODO block below the handler for endpoint details.
+// Real data comes from the WKND catalogue (EDS query-index + Aero catalog) via
+// actions/lib/wknd.js. MOCK_DATA is retained as the offline fallback used when the
+// upstream APIs are unreachable. See the note below the handler.
+const { loadAdventures } = require('../lib/wknd.js');
+
 const MOCK_DATA = [
   { adventure_id: 'patagonia-trek', name: 'W Circuit: 9 Days, 115 km', title: 'W Circuit: 9 Days, 115 km', description: 'A full field account of the W Circuit in Torres del Paine — permit strategy, daily stage breakdowns, and refugio conditions.', image_url: 'https://wknd-adventures.run.place/media_1e4b49be43a70d306b1c312d0d78dd369b5ccce40.jpg?width=1200&format=pjpg&optimize=medium', category: 'Hiking', activity: 'Hiking', landscape: 'Mountains', region: 'Americas', destination: 'Torres del Paine', country: 'Chile', experience_level: 'Advanced', pace: 'Endurance', priority: 'Physical challenge', trip_length_days: 9, duration: '9 days · 115 km', verified_status: 'Verified · February 2026', match_reason: 'A demanding multi-day mountain expedition for experienced parties who want documented permit and stage detail.' },
   { adventure_id: 'kayaking-norway', name: 'Lofoten Islands: Arctic Surfing at the Top of the World', title: 'Lofoten Islands: Arctic Surfing at the Top of the World', description: "Seven days surfing between the Lofoten peaks — cold-water preparation, swell windows, and why Unstad produces some of Europe's best Arctic waves.", image_url: 'https://wknd-adventures.run.place/media_1bd10685af4f3d38127de55d4da60d4ef86518b8d.jpg?width=1200&format=pjpg&optimize=medium', category: 'Surfing', activity: 'Surfing', landscape: 'Coast', region: 'Europe', destination: 'Lofoten Islands', country: 'Norway', experience_level: 'Advanced', pace: 'Adrenaline', priority: 'Solitude', trip_length_days: 7, duration: '7 days', verified_status: 'Verified · November 2025', match_reason: 'Cold-water surf expedition for confident surfers comfortable in serious neoprene and remote conditions.' },
@@ -15,7 +18,7 @@ const MOCK_DATA = [
 
 const norm = (v) => (typeof v === 'string' ? v.trim().toLowerCase() : '');
 
-module.exports = async ({ activity = '', experience_level = '', landscape = '', pace = '', priority = '', trip_length_days, region = '' } = {}) => {
+module.exports = async ({ activity = '', experience_level = '', landscape = '', pace = '', priority = '', trip_length_days, region = '' } = {}, extra) => {
   if (!activity || typeof activity !== 'string' || !activity.trim()) {
     return {
       content: [{ type: 'text', text: 'Please provide an activity (e.g. hiking, surfing, cycling) to match adventures.' }],
@@ -38,9 +41,15 @@ module.exports = async ({ activity = '', experience_level = '', landscape = '', 
   const regionQ = norm(region);
   const maxDays = Number.isFinite(Number(trip_length_days)) && Number(trip_length_days) > 0 ? Number(trip_length_days) : null;
 
-  const matchesActivity = (a) => norm(a.activity).includes(activityQ) || activityQ.includes(norm(a.activity));
+  const matchesActivity = (a) => {
+    const act = norm(a.activity);
+    if (!act) return false; // never match records with no activity on a blank prefix
+    return act.includes(activityQ) || activityQ.includes(act);
+  };
 
-  let results = MOCK_DATA.filter((a) => {
+  const catalog = await loadAdventures(extra, MOCK_DATA);
+
+  let results = catalog.filter((a) => {
     if (!matchesActivity(a)) return false;
     if (landscapeQ && norm(a.landscape) !== landscapeQ) return false;
     if (regionQ && !norm(a.region).includes(regionQ) && !norm(a.destination).includes(regionQ) && !norm(a.country).includes(regionQ)) return false;
@@ -97,20 +106,14 @@ module.exports = async ({ activity = '', experience_level = '', landscape = '', 
 };
 
 /*
- * TODO: Replace MOCK_DATA with a real API call.
- *
- * Suggested endpoint pattern (update based on the actual WKND Adventures API):
- *   GET ${process.env.API_BASE_URL}/adventures?activity=${activity}&experience_level=${experience_level}
- *
- * Environment variables to configure:
- *   API_BASE_URL   Base URL of the website's API
- *   API_KEY        API key if required (add to .env and app.config.yaml)
- *
- * Example fetch:
- *   const res = await fetch(
- *     `${process.env.API_BASE_URL}/adventures?activity=${encodeURIComponent(activity)}`,
- *     { headers: { 'Authorization': `Bearer ${process.env.API_KEY}` } }
- *   )
- *   if (!res.ok) throw new Error(`API error: ${res.status}`)
- *   return await res.json()
+ * Data source (real): actions/lib/wknd.js `loadAdventures(extra, MOCK_DATA)`.
+ * It merges the WKND catalogue keyed by adventure_id:
+ *   - EDS query-index  ${WKND_EDS_BASE}/query-index.json     — editorial scalars
+ *       (experienceLevel, pace, priority, landscape, region, country, duration,
+ *        tripLengthDays, verifiedStatus) authored in each page's Metadata block
+ *   - Aero catalog     ${WKND_CATALOG_BASE}/catalog/adventures/index.json — commerce
+ *       fields (name, description, image, price, destinationIata, editorialUrl)
+ * EDS wins for scalars; MOCK_DATA fills any gaps and is the fallback when both
+ * upstreams are unreachable. Base URLs come from extra.variables (WKND_EDS_BASE,
+ * WKND_CATALOG_BASE) with production defaults baked into the lib.
  */

@@ -1,6 +1,8 @@
-// TODO: Replace MOCK_DATA with a real API call.
-// See the TODO block below the handler for endpoint details.
-// MOCK_DATA — WKND adventure/route records the checklist is grounded in (real data from samplePayload).
+// The checklist is grounded on a matched WKND route. Real route data comes from the
+// WKND catalogue (EDS query-index + Aero catalog) via actions/lib/wknd.js; MOCK_DATA
+// is the offline fallback. See the note below the handler.
+const { loadAdventures } = require('../lib/wknd.js');
+
 const MOCK_DATA = [
     { adventure_id: 'patagonia-trek', name: 'W Circuit: 9 Days, 115 km', activity: 'Hiking', landscape: 'Mountains', destination: 'Torres del Paine', country: 'Chile', experience_level: 'Advanced', trip_length_days: 9, duration: '9 days · 115 km', verified_status: 'Verified · February 2026' },
     { adventure_id: 'kayaking-norway', name: 'Lofoten Islands: Arctic Surfing at the Top of the World', activity: 'Surfing', landscape: 'Coast', destination: 'Lofoten Islands', country: 'Norway', experience_level: 'Advanced', trip_length_days: 7, duration: '7 days', verified_status: 'Verified · November 2025' },
@@ -47,7 +49,7 @@ module.exports = async ({
     conditions = '',
     experience_level = '',
     camping_style = '',
-}) => {
+}, extra) => {
     const missing = [];
     if (!activity || typeof activity !== 'string' || !activity.trim()) missing.push('activity');
     if (!terrain || typeof terrain !== 'string' || !terrain.trim()) missing.push('terrain');
@@ -62,10 +64,11 @@ module.exports = async ({
     }
 
     // Ground terrain-specific requirements on a matched WKND route when one is referenced.
+    const catalog = await loadAdventures(extra, MOCK_DATA);
     const idKey = String(adventure_id).trim().toLowerCase();
     const actKey = activity.trim().toLowerCase();
-    const route = MOCK_DATA.find((r) => r.adventure_id.toLowerCase() === idKey)
-        || MOCK_DATA.find((r) => r.activity.toLowerCase() === actKey)
+    const route = catalog.find((r) => r.adventure_id.toLowerCase() === idKey)
+        || catalog.find((r) => String(r.activity || '').toLowerCase() === actKey)
         || null;
 
     const cold = isCold(conditions, season);

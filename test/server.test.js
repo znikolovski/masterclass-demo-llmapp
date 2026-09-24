@@ -359,9 +359,15 @@ describe('MCP Apps Server', () => {
 
             expect(result.statusCode).toBe(200)
             const body = JSON.parse(result.body)
-            const names = body.result.tools.map(t => t.name)
+            const names = body.result.tools.map(t => t.name).sort()
 
-            expect(names).toEqual(['echo', 'greet', 'whoami'])
+            const expectedNames = fs.readdirSync(ACTIONS_DIR, { withFileTypes: true })
+                .filter(e => e.isDirectory())
+                .map(e => e.name)
+                .filter(name => name !== 'lib')
+                .sort()
+
+            expect(names).toEqual(expectedNames)
         })
 
         test('fallback tool uses folder name as description (no metadata)', async () => {

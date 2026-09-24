@@ -1,7 +1,11 @@
-// TODO: Replace MOCK_DATA with a real API call.
-// See the TODO block below the handler for endpoint details.
-// MOCK_DATA is the WKND adventures catalogue this tool draws on to match a
-// contribution's destination/activity to a documented route.
+// The tool matches a contribution's destination/activity to a documented WKND route.
+// Real route data comes from the WKND catalogue (EDS query-index + Aero catalog) via
+// actions/lib/wknd.js; MOCK_DATA is the offline fallback. A real write path exists
+// (lib.submitForm -> B2B forms API) but is intentionally not auto-invoked here — this
+// tool *prepares* a package for editorial review rather than submitting it, and the
+// B2B forms are contact/interest forms, not an editorial-submission schema.
+const { loadAdventures } = require('../lib/wknd.js');
+
 const MOCK_DATA = [
   { adventure_id: 'patagonia-trek', name: 'W Circuit: 9 Days, 115 km', title: 'W Circuit: 9 Days, 115 km', description: 'A full field account of the W Circuit in Torres del Paine — permit strategy, daily stage breakdowns, and refugio conditions.', image_url: 'https://wknd-adventures.run.place/media_1e4b49be43a70d306b1c312d0d78dd369b5ccce40.jpg?width=1200&format=pjpg&optimize=medium', category: 'Hiking', activity: 'Hiking', landscape: 'Mountains', region: 'Americas', destination: 'Torres del Paine', country: 'Chile', experience_level: 'Advanced', pace: 'Endurance', priority: 'Physical challenge', trip_length_days: 9, duration: '9 days · 115 km', verified_status: 'Verified · February 2026', match_reason: 'A demanding multi-day mountain expedition for experienced parties who want documented permit and stage detail.' },
   { adventure_id: 'kayaking-norway', name: 'Lofoten Islands: Arctic Surfing at the Top of the World', title: 'Lofoten Islands: Arctic Surfing at the Top of the World', description: "Seven days surfing between the Lofoten peaks — cold-water preparation, swell windows, and why Unstad produces some of Europe's best Arctic waves.", image_url: 'https://wknd-adventures.run.place/media_1bd10685af4f3d38127de55d4da60d4ef86518b8d.jpg?width=1200&format=pjpg&optimize=medium', category: 'Surfing', activity: 'Surfing', landscape: 'Coast', region: 'Europe', destination: 'Lofoten Islands', country: 'Norway', experience_level: 'Advanced', pace: 'Adrenaline', priority: 'Solitude', trip_length_days: 7, duration: '7 days', verified_status: 'Verified · November 2025', match_reason: 'Cold-water surf expedition for confident surfers comfortable in serious neoprene and remote conditions.' },
@@ -39,17 +43,17 @@ function firstSentence(text, maxLen) {
   return out;
 }
 
-function findRoute(destination, activity) {
+function findRoute(catalog, destination, activity) {
   const dest = String(destination || '').trim().toLowerCase();
   const act = String(activity || '').trim().toLowerCase();
   if (dest) {
-    const byDest = MOCK_DATA.find((a) => String(a.destination || '').toLowerCase() === dest)
-      || MOCK_DATA.find((a) => String(a.destination || '').toLowerCase().includes(dest))
-      || MOCK_DATA.find((a) => String(a.name || '').toLowerCase().includes(dest));
+    const byDest = catalog.find((a) => String(a.destination || '').toLowerCase() === dest)
+      || catalog.find((a) => String(a.destination || '').toLowerCase().includes(dest))
+      || catalog.find((a) => String(a.name || '').toLowerCase().includes(dest));
     if (byDest) return byDest;
   }
   if (act) {
-    const byAct = MOCK_DATA.find((a) => String(a.activity || '').toLowerCase() === act);
+    const byAct = catalog.find((a) => String(a.activity || '').toLowerCase() === act);
     if (byAct) return byAct;
   }
   return null;
@@ -76,7 +80,7 @@ module.exports = async ({
   condition_date = '',
   contributor_bio = '',
   supporting_sources = [],
-} = {}) => {
+} = {}, extra) => {
   const emptyShape = {
     submission_type: null,
     proposed_title: null,
@@ -105,7 +109,8 @@ module.exports = async ({
   }
 
   const type = canonicalType(submission_type);
-  const route = findRoute(destination, activity);
+  const catalog = await loadAdventures(extra, MOCK_DATA);
+  const route = findRoute(catalog, destination, activity);
 
   const resolvedDestination = String(destination || '').trim() || (route ? route.destination || route.name : '') || null;
   const resolvedActivity = String(activity || '').trim() || (route ? route.activity : '') || null;

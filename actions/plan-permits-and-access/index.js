@@ -1,10 +1,11 @@
-// TODO: Replace MOCK_DATA with a real API call.
-// See the TODO block below the handler for endpoint details.
-// MOCK_DATA is the WKND destination/route archive (real samplePayload). The
-// permit / preparation / transport / seasonal / official-check detail comes from
-// the live WKND report per route and is not present in this metadata fixture — a
-// real API call populates those arrays (see TODO block below). They default to []
-// here so every return branch keeps an identical key shape.
+// Real integrations (actions/lib/wknd.js):
+//   - loadAdventures: resolve the route from the WKND catalogue (EDS + Aero)
+//   - loadAttributes: permit_requirements / access notes from the EDS attributes sheet
+//   - searchFlights:  real transport legs from origin -> the route's gateway airport
+// MOCK_DATA is the offline fallback for the route lookup. Detail arrays stay empty
+// until the sheet/flights supply real data, so every return branch keeps its shape.
+const { loadAdventures, loadAttributes, searchFlights } = require('../lib/wknd.js');
+
 const MOCK_DATA = [
     {
         adventure_id: 'patagonia-trek',
@@ -195,7 +196,7 @@ const EMPTY_PLAN = {
     source_verification: null,
 };
 
-module.exports = async ({ adventure_id = '', travel_window = '', origin = '', trip_style = '' } = {}) => {
+module.exports = async ({ adventure_id = '', travel_window = '', origin = '', trip_style = '' } = {}, extra) => {
     if (!adventure_id || typeof adventure_id !== 'string' || !adventure_id.trim()) {
         return {
             content: [{ type: 'text', text: 'Please provide an adventure_id (a WKND route or destination) to plan permits and access for.' }],
@@ -209,11 +210,12 @@ module.exports = async ({ adventure_id = '', travel_window = '', origin = '', tr
         };
     }
 
+    const catalog = await loadAdventures(extra, MOCK_DATA);
     const query = adventure_id.trim().toLowerCase();
-    const report = MOCK_DATA.find((r) => r.adventure_id.toLowerCase() === query)
-        || MOCK_DATA.find((r) => (r.title || '').toLowerCase() === query)
-        || MOCK_DATA.find((r) => (r.name || '').toLowerCase().includes(query))
-        || MOCK_DATA.find((r) => (r.title || '').toLowerCase().includes(query));
+    const report = catalog.find((r) => r.adventure_id.toLowerCase() === query)
+        || catalog.find((r) => (r.title || '').toLowerCase() === query)
+        || catalog.find((r) => (r.name || '').toLowerCase().includes(query))
+        || catalog.find((r) => (r.title || '').toLowerCase().includes(query));
 
     if (!report) {
         return {
@@ -224,17 +226,41 @@ module.exports = async ({ adventure_id = '', travel_window = '', origin = '', tr
 
     const destination = [report.destination, report.country].filter(Boolean).join(', ') || report.destination || null;
 
-    // permit / preparation / transport / seasonal / official-check arrays are sourced from
-    // the live WKND report per route (not present in this metadata fixture) — a real API
-    // call populates them. See the TODO block below.
+    // Permit + access detail from the EDS attributes sheet (real when published), and
+    // real transport legs from the Aero flights API when an origin and the route's
+    // gateway airport (destination_iata) are both known. Arrays stay empty when the
+    // upstreams have nothing, preserving the output shape.
+    const attrs = (await loadAttributes(extra))[report.adventure_id] || {};
+    const permitRequirements = Array.isArray(attrs.permits) ? attrs.permits.slice() : [];
+
+    const transport = [];
+    if (attrs.access_notes) transport.push(attrs.access_notes);
+    const gateway = report.destination_iata || '';
+    if (origin && origin.trim() && gateway) {
+        const flights = await searchFlights(extra, { from: origin.trim(), to: gateway });
+        const offers = (flights && (flights.flights || flights.results || flights.data)) || [];
+        if (Array.isArray(offers) && offers.length) {
+            const f = offers[0];
+            const price = f.price && (f.price.total || f.price.amount || f.price.final);
+            transport.push(`Fly ${origin.trim().toUpperCase()} → ${gateway}`
+                + (f.carrier || f.airline ? ` on ${f.carrier || f.airline}` : '')
+                + (price ? ` from ${price}` : '')
+                + ' (live fare via WKND Aero).');
+        } else if (gateway) {
+            transport.push(`Nearest gateway airport: ${gateway}. No live fares returned for ${origin.trim().toUpperCase()} → ${gateway}.`);
+        }
+    } else if (gateway) {
+        transport.push(`Nearest gateway airport: ${gateway}. Provide an origin airport to fetch live fares.`);
+    }
+
     const plan = {
         adventure_id: report.adventure_id,
         route_title: report.title || report.name || null,
         destination,
         travel_window: travel_window.trim(),
-        permit_requirements: [],
+        permit_requirements: permitRequirements,
         preparation_steps: [],
-        transport_and_trailhead: [],
+        transport_and_trailhead: transport,
         seasonal_access: [],
         official_checks: [],
         source_verification: report.verified_status || null,
