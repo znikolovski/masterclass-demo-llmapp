@@ -29,6 +29,19 @@
  * runtime documents; Claude exposes no session _meta yet, a host
  * limitation, not something fixable here).
  *
+ * Sends two sibling objects per Adobe's documented dual-path model (a `data`
+ * object is NOT sent to the AEP dataset, only used for direct Analytics
+ * variable mapping — see https://experienceleague.adobe.com/en/docs/analytics/implementation/aep-edge/data-var-mapping):
+ *   xdm             — full mcp.* field set, lands in the AEP dataset via schema
+ *   data.__adobe.analytics — same fields re-keyed to eVar10-15/event22-24,
+ *                     read directly by Adobe Analytics with no processing
+ *                     rules or context-data key matching involved. Confirmed
+ *                     free slots in this report suite (2026-09-24):
+ *                       eVar10 mcpMethod   eVar13 errorClass
+ *                       eVar11 hostSession eVar14 organizationId
+ *                       eVar12 status      eVar15 userIntent
+ *                       event22 durationMs event23 inputSizeBytes event24 outputSizeBytes
+ *
  * Configure via app variables (LLM Apps UI):
  *   WKND_ANALYTICS_DATASTREAM_ID — required; the datastream UUID
  *   WKND_ANALYTICS_ORG_ID        — required; IMS org (e.g. 28260E2056581D3B7F000101@AdobeOrg)
@@ -148,6 +161,25 @@ async function sendMcpAnalyticsEvent(extra, fields) {
     xdm.identityMap = { MCPHOSTUSER: [{ id: hostSession, authenticatedState: 'ambiguous', primary: true }] };
   }
 
+  // Direct Analytics variable mapping (see module doc) — bypasses processing
+  // rules entirely. Re-keys the same values already computed above for `mcp`.
+  const analyticsVars = {
+    eVar10: mcp.mcpMethod,
+    eVar12: mcp.status,
+    eVar14: mcp.organizationId,
+  };
+  if (mcp.hostSession) analyticsVars.eVar11 = mcp.hostSession;
+  if (mcp.errorClass) analyticsVars.eVar13 = mcp.errorClass;
+  if (mcp.userIntent) analyticsVars.eVar15 = mcp.userIntent;
+
+  const eventPairs = [];
+  if (Number.isFinite(mcp.durationMs)) eventPairs.push(`event22=${mcp.durationMs}`);
+  if (Number.isFinite(mcp.inputSizeBytes)) eventPairs.push(`event23=${mcp.inputSizeBytes}`);
+  if (Number.isFinite(mcp.outputSizeBytes)) eventPairs.push(`event24=${mcp.outputSizeBytes}`);
+  if (eventPairs.length) analyticsVars.events = eventPairs.join(',');
+
+  const data = { __adobe: { analytics: analyticsVars } };
+
   const url = `https://${EDGE_INTERACT_HOST}/ee/v2/interact?dataStreamId=${encodeURIComponent(cfg.datastreamId)}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -155,7 +187,7 @@ async function sendMcpAnalyticsEvent(extra, fields) {
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ event: { xdm } }),
+      body: JSON.stringify({ event: { xdm, data } }),
       signal: controller.signal,
     });
     // TEMP DEBUG — remove once processing-rule mapping is confirmed working.
