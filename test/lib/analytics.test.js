@@ -56,7 +56,7 @@ describe('sendMcpAnalyticsEvent', () => {
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, opts] = fetchSpy.mock.calls[0];
-    expect(url).toBe('https://edge.adobedc.net/ee/v2/interact?configId=ds-123');
+    expect(url).toBe('https://edge.adobedc.net/ee/v2/interact?dataStreamId=ds-123');
     expect(opts.method).toBe('POST');
 
     const body = JSON.parse(opts.body);

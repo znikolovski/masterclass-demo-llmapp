@@ -137,7 +137,7 @@ async function sendMcpAnalyticsEvent(extra, fields) {
     xdm.identityMap = { MCPHOSTUSER: [{ id: hostSession, authenticatedState: 'ambiguous', primary: true }] };
   }
 
-  const url = `https://${EDGE_INTERACT_HOST}/ee/v2/interact?configId=${encodeURIComponent(cfg.datastreamId)}`;
+  const url = `https://${EDGE_INTERACT_HOST}/ee/v2/interact?dataStreamId=${encodeURIComponent(cfg.datastreamId)}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
