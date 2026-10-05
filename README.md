@@ -222,6 +222,14 @@ node server/local.js \
 
 Without those flags, `extra.variables` is `undefined` and `greet` falls back to its default greeting — degrade gracefully, same as `authInfo`.
 
+## Adobe Analytics for MCP actions
+
+The six WKND adventure actions are wrapped by `actions/lib/analytics.js`. Each invocation sends one server-side event to Adobe Edge Network using the WKND datastream. It includes a virtual page view (`mcp:<action-name>`) so Adobe Analytics counts the action, and records status, duration, input/output byte sizes, and selected host context. Tool arguments and outputs are not serialized into the event; only their byte sizes are sent, except optional `userIntent`, which is capped at 255 UTF-8 bytes.
+
+The event sends XDM under the datastream's custom tenant namespace (with the required leading `_`) and Analytics variables under `event.data.__adobe.analytics` for direct eVar/event mapping. The POC falls back to the non-secret datastream ID, IMS organization ID, and XDM tenant in `actions/lib/analytics.js` because the LLM Apps UI does not currently expose these variables; `WKND_ANALYTICS_DATASTREAM_ID`, `WKND_ANALYTICS_ORG_ID`, and `WKND_ANALYTICS_XDM_TENANT` override them when available.
+
+For reportable data, verify that the datastream routes to the intended Adobe Analytics report suite, its XDM schema includes the custom tenant field group, and the module's eVar/event slots and numeric event types are configured there. If the app also enables the LLM Apps runtime's built-in Edge event, set `sendsEdgeEvent: false` for these actions to avoid duplicate page-view hits. The custom sender is awaited, fail-soft, and bounded to three seconds so tracking failures do not fail a tool call.
+
 ## `content` vs `structuredContent`
 
 | | `content` | `structuredContent` |

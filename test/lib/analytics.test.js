@@ -20,12 +20,12 @@ describe('readAnalyticsConfig', () => {
     expect(readAnalyticsConfig(undefined)).toEqual({
       datastreamId: FALLBACK_DATASTREAM_ID,
       orgId: FALLBACK_ORG_ID,
-      xdmTenant: FALLBACK_XDM_TENANT,
+      xdmTenant: `_${FALLBACK_XDM_TENANT}`,
     });
     expect(readAnalyticsConfig({ variables: {} })).toEqual({
       datastreamId: FALLBACK_DATASTREAM_ID,
       orgId: FALLBACK_ORG_ID,
-      xdmTenant: FALLBACK_XDM_TENANT,
+      xdmTenant: `_${FALLBACK_XDM_TENANT}`,
     });
   });
 
@@ -33,7 +33,7 @@ describe('readAnalyticsConfig', () => {
     expect(readAnalyticsConfig({ variables: { WKND_ANALYTICS_DATASTREAM_ID: 'ds-123' } })).toEqual({
       datastreamId: 'ds-123',
       orgId: FALLBACK_ORG_ID,
-      xdmTenant: FALLBACK_XDM_TENANT,
+      xdmTenant: `_${FALLBACK_XDM_TENANT}`,
     });
   });
 
@@ -41,8 +41,13 @@ describe('readAnalyticsConfig', () => {
     expect(readAnalyticsConfig(CONFIGURED_EXTRA)).toEqual({
       datastreamId: 'ds-123',
       orgId: '28260E2056581D3B7F000101@AdobeOrg',
-      xdmTenant: 'wkndmcp',
+      xdmTenant: '_wkndmcp',
     });
+  });
+
+  test('normalizes a prefixed tenant and rejects invalid tenant names', () => {
+    expect(readAnalyticsConfig({ variables: { WKND_ANALYTICS_XDM_TENANT: '_wkndmcp' } }).xdmTenant).toBe('_wkndmcp');
+    expect(readAnalyticsConfig({ variables: { WKND_ANALYTICS_XDM_TENANT: 'wknd-mcp' } })).toBeNull();
   });
 });
 
@@ -50,7 +55,7 @@ describe('sendMcpAnalyticsEvent', () => {
   let fetchSpy;
 
   beforeEach(() => {
-    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({}) });
+    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
   });
 
   afterEach(() => {
@@ -62,8 +67,9 @@ describe('sendMcpAnalyticsEvent', () => {
   test('still calls fetch when unconfigured, using the fallback datastream', async () => {
     await sendMcpAnalyticsEvent(undefined, { toolName: 'discover_adventures', mcpMethod: 'tools/call', status: 'ok' });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    const [url] = fetchSpy.mock.calls[0];
+    const [url, options] = fetchSpy.mock.calls[0];
     expect(url).toBe(`https://edge.adobedc.net/ee/v2/interact?dataStreamId=${FALLBACK_DATASTREAM_ID}`);
+    expect(JSON.parse(options.body).event.xdm._ags050.mcp.toolName).toBe('discover_adventures');
   });
 
   test('posts the full field set to the Edge interact endpoint under the configured tenant', async () => {
@@ -86,7 +92,7 @@ describe('sendMcpAnalyticsEvent', () => {
     expect(body.event.xdm.eventType).toBe('mcp.tool_call');
     expect(body.event.xdm.web.webPageDetails.name).toBe('mcp:build_route_briefing');
     expect(body.event.xdm.web.webPageDetails.pageViews.value).toBe(1);
-    expect(body.event.xdm.wkndmcp.mcp).toEqual({
+    expect(body.event.xdm._wkndmcp.mcp).toEqual({
       toolName: 'build_route_briefing',
       mcpMethod: 'tools/call',
       status: 'ok',
@@ -97,16 +103,16 @@ describe('sendMcpAnalyticsEvent', () => {
       userIntent: 'Plan a trip',
     });
 
-    // Direct Analytics variable mapping (flat data object) — bypasses
+    // Direct Analytics variable mapping at Adobe's documented data path —
     // processing rules. toolName is NOT re-keyed here; it maps to Page Name
     // via xdm.web.webPageDetails.name instead (asserted above).
-    expect(body.event.data).toEqual({
+    expect(body.event.data).toEqual({ __adobe: { analytics: {
       eVar10: 'tools/call',
       eVar12: 'ok',
       eVar14: '28260E2056581D3B7F000101@AdobeOrg',
       eVar15: 'Plan a trip',
       events: 'event22=42,event23=100,event24=200',
-    });
+    } } });
   });
 
   test('includes errorClass on error status and omits it on success', async () => {
@@ -114,10 +120,10 @@ describe('sendMcpAnalyticsEvent', () => {
       toolName: 'x', mcpMethod: 'tools/call', status: 'error', errorClass: 'TypeError', durationMs: 1, inputSize: 1, outputSize: 0,
     });
     const errBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(errBody.event.xdm.wkndmcp.mcp.errorClass).toBe('TypeError');
-    expect(errBody.event.xdm.wkndmcp.mcp.status).toBe('error');
-    expect(errBody.event.data.eVar13).toBe('TypeError');
-    expect(errBody.event.data.eVar12).toBe('error');
+    expect(errBody.event.xdm._wkndmcp.mcp.errorClass).toBe('TypeError');
+    expect(errBody.event.xdm._wkndmcp.mcp.status).toBe('error');
+    expect(errBody.event.data.__adobe.analytics.eVar13).toBe('TypeError');
+    expect(errBody.event.data.__adobe.analytics.eVar12).toBe('error');
   });
 
   test('includes hostSession as both a plain field and MCPHOSTUSER identity, absent otherwise', async () => {
@@ -126,17 +132,17 @@ describe('sendMcpAnalyticsEvent', () => {
       { toolName: 'x', mcpMethod: 'tools/call', status: 'ok', durationMs: 1, inputSize: 1, outputSize: 1 },
     );
     const withSession = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(withSession.event.xdm.wkndmcp.mcp.hostSession).toBe('sess-abc');
+    expect(withSession.event.xdm._wkndmcp.mcp.hostSession).toBe('sess-abc');
     expect(withSession.event.xdm.identityMap).toEqual({
       MCPHOSTUSER: [{ id: 'sess-abc', authenticatedState: 'ambiguous', primary: true }],
     });
-    expect(withSession.event.data.eVar11).toBe('sess-abc');
+    expect(withSession.event.data.__adobe.analytics.eVar11).toBe('sess-abc');
 
     await sendMcpAnalyticsEvent(CONFIGURED_EXTRA, { toolName: 'x', mcpMethod: 'tools/call', status: 'ok', durationMs: 1, inputSize: 1, outputSize: 1 });
     const withoutSession = JSON.parse(fetchSpy.mock.calls[1][1].body);
-    expect(withoutSession.event.xdm.wkndmcp.mcp.hostSession).toBeUndefined();
+    expect(withoutSession.event.xdm._wkndmcp.mcp.hostSession).toBeUndefined();
     expect(withoutSession.event.xdm.identityMap).toBeUndefined();
-    expect(withoutSession.event.data.eVar11).toBeUndefined();
+    expect(withoutSession.event.data.__adobe.analytics.eVar11).toBeUndefined();
   });
 
   test('never throws when the request fails', async () => {
@@ -149,7 +155,7 @@ describe('withAnalytics', () => {
   let fetchSpy;
 
   beforeEach(() => {
-    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({}) });
+    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
   });
 
   afterEach(() => {
@@ -164,9 +170,11 @@ describe('withAnalytics', () => {
     expect(handler).toHaveBeenCalledWith({ activity: 'hiking' }, CONFIGURED_EXTRA);
     expect(out.structuredContent.hasExtra).toBe(true);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.event.xdm.wkndmcp.mcp.status).toBe('ok');
-    expect(body.event.xdm.wkndmcp.mcp.toolName).toBe('discover_adventures');
+    const rawBody = fetchSpy.mock.calls[0][1].body;
+    const body = JSON.parse(rawBody);
+    expect(rawBody).not.toContain('hiking');
+    expect(body.event.xdm._wkndmcp.mcp.status).toBe('ok');
+    expect(body.event.xdm._wkndmcp.mcp.toolName).toBe('discover_adventures');
   });
 
   test('reports status=error and rethrows on handler failure, without swallowing the error', async () => {
@@ -176,8 +184,8 @@ describe('withAnalytics', () => {
 
     await expect(wrapped({}, CONFIGURED_EXTRA)).rejects.toThrow('boom');
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.event.xdm.wkndmcp.mcp.status).toBe('error');
-    expect(body.event.xdm.wkndmcp.mcp.errorClass).toBe('TypeError');
+    expect(body.event.xdm._wkndmcp.mcp.status).toBe('error');
+    expect(body.event.xdm._wkndmcp.mcp.errorClass).toBe('TypeError');
   });
 
   // TEMP: falls back to hardcoded config when unconfigured (see readAnalyticsConfig),

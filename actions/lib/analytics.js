@@ -46,6 +46,7 @@
  *   WKND_ANALYTICS_DATASTREAM_ID — required; the datastream UUID
  *   WKND_ANALYTICS_ORG_ID        — required; IMS org (e.g. 28260E2056581D3B7F000101@AdobeOrg)
  *   WKND_ANALYTICS_XDM_TENANT    — required; tenant id owning the custom field group
+ *                                  (leading underscore is added when omitted)
  * Missing any of these disables sending entirely (fail-soft, never blocks a tool call).
  *
  * TEMPORARY: the LLM Apps UI currently has no way to add these variables for
@@ -72,8 +73,10 @@ function getVar(extra, name) {
 function readAnalyticsConfig(extra) {
   const datastreamId = getVar(extra, 'WKND_ANALYTICS_DATASTREAM_ID') || FALLBACK_DATASTREAM_ID;
   const orgId = getVar(extra, 'WKND_ANALYTICS_ORG_ID') || FALLBACK_ORG_ID;
-  const xdmTenant = getVar(extra, 'WKND_ANALYTICS_XDM_TENANT') || FALLBACK_XDM_TENANT;
+  const configuredTenant = getVar(extra, 'WKND_ANALYTICS_XDM_TENANT') || FALLBACK_XDM_TENANT;
+  const xdmTenant = configuredTenant.startsWith('_') ? configuredTenant : `_${configuredTenant}`;
   if (!datastreamId || !orgId || !xdmTenant) return null;
+  if (!/^_[A-Za-z][A-Za-z0-9_]*$/.test(xdmTenant)) return null;
   return { datastreamId, orgId, xdmTenant };
 }
 
@@ -178,13 +181,9 @@ async function sendMcpAnalyticsEvent(extra, fields) {
   if (Number.isFinite(mcp.outputSizeBytes)) eventPairs.push(`event24=${mcp.outputSizeBytes}`);
   if (eventPairs.length) analyticsVars.events = eventPairs.join(',');
 
-  // Flat, no __adobe.analytics wrapper: that nesting is a Web SDK (alloy.js)
-  // client-side abstraction the library itself flattens before making the
-  // HTTP call — Adobe's raw interact-endpoint reference shows `data` fields
-  // (e.g. prop1) as direct children with no wrapper, and this module calls
-  // /ee/v2/interact directly (bypassing the Web SDK), so it must match that
-  // wire format rather than the SDK-level one.
-  const data = analyticsVars;
+  // Adobe's Analytics variable mapping contract reads these fields from this
+  // exact path in the Edge event payload, including for direct interact calls.
+  const data = { __adobe: { analytics: analyticsVars } };
 
   const url = `https://${EDGE_INTERACT_HOST}/ee/v2/interact?dataStreamId=${encodeURIComponent(cfg.datastreamId)}`;
   const controller = new AbortController();
