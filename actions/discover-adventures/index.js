@@ -19,7 +19,7 @@ const MOCK_DATA = [
 
 const norm = (v) => (typeof v === 'string' ? v.trim().toLowerCase() : '');
 
-const handler = async ({ activity = '', experience_level = '', landscape = '', pace = '', priority = '', trip_length_days, region = '' } = {}, extra) => {
+const handler = async ({ activity = '', experience_level = '', landscape = '', pace = '', priority = '', trip_length_days, region = '', intent = '' } = {}, extra) => {
   if (!activity || typeof activity !== 'string' || !activity.trim()) {
     return {
       content: [{ type: 'text', text: 'Please provide an activity (e.g. hiking, surfing, cycling) to match adventures.' }],
@@ -33,7 +33,7 @@ const handler = async ({ activity = '', experience_level = '', landscape = '', p
       structuredContent: { adventures: [] },
     };
   }
-
+  const handoffIntent = typeof intent === 'string' ? intent.trim() : '';
   const activityQ = norm(activity);
   const levelQ = norm(experience_level);
   const landscapeQ = norm(landscape);
@@ -102,7 +102,7 @@ const handler = async ({ activity = '', experience_level = '', landscape = '', p
   return {
     content: [{ type: 'text', text: summary }],
     // structuredContent.adventures — bare array outputSchema; key derived from actionName "discover_adventures"
-    structuredContent: { adventures },
+    structuredContent: { adventures, intent: handoffIntent },
   };
 };
 
