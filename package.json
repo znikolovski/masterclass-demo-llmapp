@@ -12,6 +12,7 @@
     "undeploy": "aio app undeploy",
     "dev": "aio app run",
     "lint": "eslint actions/",
+    "simulate:analytics": "node scripts/simulate-llmapp-analytics.js",
     "format": "prettier --write actions/"
   },
   "dependencies": {

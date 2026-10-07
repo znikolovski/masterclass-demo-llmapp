@@ -122,11 +122,16 @@ function hostSessionFromExtra(extra) {
  * @param {number} fields.inputSize
  * @param {number} fields.outputSize
  * @param {string} [fields.userIntent]
- * @returns {Promise<void>}
+ * @param {object} [options] backfill/simulation overrides (unused by live tool calls)
+ * @param {Date|string|number} [options.timestamp] event time; defaults to now
+ * @param {string} [options.ecid] ECID returned by an earlier Edge call for the same visitor
+ * @param {boolean} [options.dryRun] build the payload but do not send it
+ * @param {boolean} [options.fetchEcid] ask Edge to return the visitor's ECID
+ * @returns {Promise<{sent:boolean,status?:number,ecid?:string,error?:string,body?:object}|null>}
  */
-async function sendMcpAnalyticsEvent(extra, fields) {
+async function sendMcpAnalyticsEvent(extra, fields, options = {}) {
   const cfg = readAnalyticsConfig(extra);
-  if (!cfg) return;
+  if (!cfg) return null;
 
   const {
     toolName, mcpMethod, status, errorClass, durationMs, inputSize, outputSize, userIntent,
@@ -152,7 +157,7 @@ async function sendMcpAnalyticsEvent(extra, fields) {
 
   const xdm = {
     eventType: 'mcp.tool_call',
-    timestamp: new Date().toISOString(),
+    timestamp: new Date(options.timestamp ?? Date.now()).toISOString(),
     // Required for Adobe Analytics to count this as a hit (Occurrences), not
     // just an AEP dataset row — see wrapHandlerWithEdge's own comment on the
     // same requirement for its automatic event.
@@ -160,8 +165,12 @@ async function sendMcpAnalyticsEvent(extra, fields) {
     [cfg.xdmTenant]: { mcp },
   };
 
-  if (hostSession) {
-    xdm.identityMap = { MCPHOSTUSER: [{ id: hostSession, authenticatedState: 'ambiguous', primary: true }] };
+  if (hostSession || options.ecid) {
+    xdm.identityMap = {};
+    if (options.ecid) xdm.identityMap.ECID = [{ id: options.ecid, authenticatedState: 'ambiguous', primary: true }];
+    if (hostSession) {
+      xdm.identityMap.MCPHOSTUSER = [{ id: hostSession, authenticatedState: 'ambiguous', primary: !options.ecid }];
+    }
   }
 
   // Direct Analytics variable mapping (see module doc) — bypasses processing
@@ -184,31 +193,53 @@ async function sendMcpAnalyticsEvent(extra, fields) {
   // Adobe's Analytics variable mapping contract reads these fields from this
   // exact path in the Edge event payload, including for direct interact calls.
   const data = { __adobe: { analytics: analyticsVars } };
+  const body = { event: { xdm, data } };
+  if (options.fetchEcid) body.query = { identity: { fetch: ['ECID'] } };
+  if (options.dryRun) return { sent: false, body };
 
   const url = `https://${EDGE_INTERACT_HOST}/ee/v2/interact?dataStreamId=${encodeURIComponent(cfg.datastreamId)}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const quiet = Boolean(options.timestamp || options.ecid || options.fetchEcid);
   try {
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ event: { xdm, data } }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
-    // TEMP DEBUG — remove once processing-rule mapping is confirmed working.
     if (!response.ok) {
-      const body = await response.text().catch(() => '<unreadable body>');
-      console.error('[analytics] edge interact rejected', response.status, body);
-    } else {
-      console.log('[analytics] edge interact accepted', response.status);
+      const errorBody = await response.text().catch(() => '<unreadable body>');
+      // TEMP DEBUG — remove once processing-rule mapping is confirmed working.
+      if (!quiet) console.error('[analytics] edge interact rejected', response.status, errorBody);
+      return {
+        sent: false, status: response.status, error: errorBody, body,
+      };
     }
+    // TEMP DEBUG — remove once processing-rule mapping is confirmed working.
+    if (!quiet) console.log('[analytics] edge interact accepted', response.status);
+    const responseBody = typeof response.json === 'function' ? await response.json().catch(() => null) : null;
+    return {
+      sent: true, status: response.status, ecid: ecidFromEdgeResponse(responseBody) || options.ecid, body,
+    };
   } catch (err) {
     // TEMP DEBUG — remove once processing-rule mapping is confirmed working.
-    console.error('[analytics] edge interact request failed', err && err.message);
+    if (!quiet) console.error('[analytics] edge interact request failed', err && err.message);
     // fail-soft — analytics must never affect the tool call
+    return { sent: false, error: (err && err.message) || 'request failed', body };
   } finally {
     clearTimeout(timer);
   }
+}
+
+function ecidFromEdgeResponse(responseBody) {
+  const handles = (responseBody && responseBody.handle) || [];
+  for (const handle of handles) {
+    if (handle.type !== 'identity:result') continue;
+    const match = (handle.payload || []).find((p) => p && p.namespace && p.namespace.code === 'ECID');
+    if (match && match.id) return match.id;
+  }
+  return undefined;
 }
 
 /**
@@ -223,42 +254,59 @@ async function sendMcpAnalyticsEvent(extra, fields) {
  * @returns {(args: object, extra?: object) => Promise<object>}
  */
 function withAnalytics(toolName, handler) {
-  return async (args, extra) => {
-    const startedAt = Date.now();
-    const inputSize = safeSize(args);
-    const userIntent = args && typeof args === 'object' ? args.userIntent : undefined;
-    try {
-      const result = await handler(args, extra);
-      await sendMcpAnalyticsEvent(extra, {
-        toolName,
-        mcpMethod: 'tools/call',
-        status: 'ok',
-        durationMs: Date.now() - startedAt,
-        inputSize,
-        outputSize: safeSize(result),
-        userIntent,
-      });
-      return result;
-    } catch (err) {
-      const errorClass = (err && err.constructor && err.constructor.name) || 'Error';
-      await sendMcpAnalyticsEvent(extra, {
-        toolName,
-        mcpMethod: 'tools/call',
-        status: 'error',
-        errorClass,
-        durationMs: Date.now() - startedAt,
-        inputSize,
-        outputSize: 0,
-        userIntent,
-      });
-      throw err;
-    }
+  const wrapped = (args, extra) => invokeWithAnalytics(toolName, handler, args, extra);
+  // Lets scripts/simulate-llmapp-analytics.js run the real handler with a backdated event.
+  wrapped.toolName = toolName;
+  wrapped.invokeWithAnalytics = (args, extra, options) => invokeWithAnalytics(toolName, handler, args, extra, options);
+  return wrapped;
+}
+
+/**
+ * Run one handler call and report it. `options` is forwarded to
+ * sendMcpAnalyticsEvent; `options.onAnalytics` receives its send result.
+ */
+async function invokeWithAnalytics(toolName, handler, args, extra, options = {}) {
+  const { onAnalytics, ...sendOptions } = options;
+  const report = async (fields) => {
+    const outcome = await sendMcpAnalyticsEvent(extra, fields, sendOptions);
+    if (onAnalytics) onAnalytics(outcome, fields);
   };
+  const startedAt = Date.now();
+  const inputSize = safeSize(args);
+  const userIntent = args && typeof args === 'object' ? args.userIntent : undefined;
+  try {
+    const result = await handler(args, extra);
+    await report({
+      toolName,
+      mcpMethod: 'tools/call',
+      status: 'ok',
+      durationMs: Date.now() - startedAt,
+      inputSize,
+      outputSize: safeSize(result),
+      userIntent,
+    });
+    return result;
+  } catch (err) {
+    const errorClass = (err && err.constructor && err.constructor.name) || 'Error';
+    await report({
+      toolName,
+      mcpMethod: 'tools/call',
+      status: 'error',
+      errorClass,
+      durationMs: Date.now() - startedAt,
+      inputSize,
+      outputSize: 0,
+      userIntent,
+    });
+    throw err;
+  }
 }
 
 module.exports = {
   withAnalytics,
+  invokeWithAnalytics,
   sendMcpAnalyticsEvent,
+  ecidFromEdgeResponse,
   readAnalyticsConfig,
   FALLBACK_DATASTREAM_ID,
   FALLBACK_ORG_ID,

@@ -230,6 +230,12 @@ The event sends XDM under the datastream's custom tenant namespace (with the req
 
 For reportable data, verify that the datastream routes to the intended Adobe Analytics report suite, its XDM schema includes the custom tenant field group, and the module's eVar/event slots and numeric event types are configured there. If the app also enables the LLM Apps runtime's built-in Edge event, set `sendsEdgeEvent: false` for these actions to avoid duplicate page-view hits. The custom sender is awaited, fail-soft, and bounded to three seconds so tracking failures do not fail a tool call.
 
+### Backfilling a week of report data
+
+`npm run simulate:analytics -- --dry-run` previews a backfill without sending it; drop `--dry-run` to send. Options: `--days=7`, `--sessions-per-day=40`, `--concurrency=4`, and `--seed=42`. The script executes the real action handlers against the live WKND catalogue through the same analytics wrapper as production. Status, duration, sizes, and payload shape are therefore measured; only the event timestamp is backdated. Conversations follow weighted tool journeys spread across UTC hours, and each one reuses the ECID returned by Edge so visits and visitors stitch correctly.
+
+The Analytics report suite must use **Timestamps optional** or **Timestamps required**; otherwise backdated hits are dropped. Simulated ChatGPT sessions use `sim-` session IDs (`eVar11`). Simulated non-ChatGPT sessions have no session ID, matching production, so they cannot be separated from real traffic. Re-running the script adds more hits, and Adobe Analytics data can take up to about 90 minutes to appear.
+
 ## `content` vs `structuredContent`
 
 | | `content` | `structuredContent` |

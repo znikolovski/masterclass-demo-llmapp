@@ -1,5 +1,5 @@
 const {
-  withAnalytics, sendMcpAnalyticsEvent, readAnalyticsConfig,
+  withAnalytics, sendMcpAnalyticsEvent, readAnalyticsConfig, ecidFromEdgeResponse,
   FALLBACK_DATASTREAM_ID, FALLBACK_ORG_ID, FALLBACK_XDM_TENANT,
 } = require('../../actions/lib/analytics.js');
 
@@ -147,7 +147,39 @@ describe('sendMcpAnalyticsEvent', () => {
 
   test('never throws when the request fails', async () => {
     fetchSpy.mockRejectedValue(new Error('network down'));
-    await expect(sendMcpAnalyticsEvent(CONFIGURED_EXTRA, { toolName: 'x', mcpMethod: 'tools/call', status: 'ok' })).resolves.toBeUndefined();
+    await expect(sendMcpAnalyticsEvent(CONFIGURED_EXTRA, { toolName: 'x', mcpMethod: 'tools/call', status: 'ok' })).resolves.toMatchObject({ sent: false, error: 'network down' });
+  });
+
+  test('applies backfill timestamp and ECID, and returns the Edge ECID', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ handle: [{ type: 'identity:result', payload: [{ id: 'ecid-new', namespace: { code: 'ECID' } }] }] }),
+    });
+    const extra = { ...CONFIGURED_EXTRA, _meta: { 'openai/session': 'sess-1' } };
+    const outcome = await sendMcpAnalyticsEvent(extra, { toolName: 'x', mcpMethod: 'tools/call', status: 'ok' }, {
+      timestamp: '2026-01-02T03:04:05.000Z', ecid: 'ecid-old', fetchEcid: true,
+    });
+    const sentBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    const { xdm } = sentBody.event;
+    expect(sentBody.query).toEqual({ identity: { fetch: ['ECID'] } });
+    expect(xdm.timestamp).toBe('2026-01-02T03:04:05.000Z');
+    expect(xdm.identityMap.ECID[0]).toMatchObject({ id: 'ecid-old', primary: true });
+    expect(xdm.identityMap.MCPHOSTUSER[0]).toMatchObject({ id: 'sess-1', primary: false });
+    expect(outcome).toMatchObject({ sent: true, status: 200, ecid: 'ecid-new' });
+  });
+
+  test('dry run builds the payload without sending', async () => {
+    const outcome = await sendMcpAnalyticsEvent(CONFIGURED_EXTRA, { toolName: 'x', mcpMethod: 'tools/call', status: 'ok' }, { dryRun: true });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(outcome.body.event.data.__adobe.analytics.eVar12).toBe('ok');
+  });
+});
+
+describe('ecidFromEdgeResponse', () => {
+  test('ignores non-ECID identities and missing handles', () => {
+    expect(ecidFromEdgeResponse(null)).toBeUndefined();
+    expect(ecidFromEdgeResponse({ handle: [{ type: 'identity:result', payload: [{ id: 'x', namespace: { code: 'CORE' } }] }] })).toBeUndefined();
   });
 });
 
