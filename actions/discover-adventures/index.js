@@ -19,6 +19,30 @@ const MOCK_DATA = [
 
 const norm = (v) => (typeof v === 'string' ? v.trim().toLowerCase() : '');
 
+// Hosts often pass "any" / "all levels" style values instead of omitting a preference.
+const WILDCARDS = new Set(['any', 'all', 'all levels', 'any level', 'anything', 'either', 'flexible', 'no preference', 'not sure', 'n/a']);
+const pref = (v) => (WILDCARDS.has(norm(v)) ? '' : norm(v));
+
+// Live catalogue records often carry only a coarse activity (general-outdoor -> Hiking),
+// so equivalent terms must match each other.
+const ACTIVITY_SYNONYMS = [
+  ['hiking', 'hike', 'trekking', 'trek', 'walking', 'backpacking', 'rambling'],
+  ['water', 'surfing', 'surf', 'kayaking', 'kayak', 'paddling', 'swimming', 'wild swimming'],
+  ['climbing', 'rock climbing', 'scrambling', 'bouldering'],
+  ['cycling', 'biking', 'bike', 'bikepacking'],
+];
+const activityTerms = (q) => {
+  const group = ACTIVITY_SYNONYMS.find((g) => g.some((t) => q === t || q.includes(t)));
+  return group ? [q, ...group] : [q];
+};
+
+const STOP_WORDS = new Set(['and', 'or', 'the', 'with', 'near', 'in', 'of', 'a', 'an']);
+// "mountains, lake, and national park" -> ['mountains', 'lake', 'national park'] (singularized check below)
+const phraseParts = (q) => q.split(/,|\band\b|\bor\b|\//).map((t) => t.trim())
+  .filter((t) => t.length >= 3 && !STOP_WORDS.has(t));
+const textOf = (a, keys) => keys.map((k) => norm(a[k])).join(' ');
+const containsTerm = (text, term) => text.includes(term) || (term.endsWith('s') && text.includes(term.slice(0, -1)));
+
 const handler = async ({ activity = '', experience_level = '', landscape = '', pace = '', priority = '', trip_length_days, region = '', intent = '' } = {}, extra) => {
   if (!activity || typeof activity !== 'string' || !activity.trim()) {
     return {
@@ -34,26 +58,38 @@ const handler = async ({ activity = '', experience_level = '', landscape = '', p
     };
   }
   const handoffIntent = typeof intent === 'string' ? intent.trim() : '';
-  const activityQ = norm(activity);
-  const levelQ = norm(experience_level);
-  const landscapeQ = norm(landscape);
-  const paceQ = norm(pace);
-  const priorityQ = norm(priority);
-  const regionQ = norm(region);
+  const activityQ = pref(activity);
+  const levelQ = pref(experience_level);
+  const landscapeParts = phraseParts(pref(landscape));
+  const paceQ = pref(pace);
+  const priorityQ = pref(priority);
+  const regionParts = phraseParts(pref(region));
+  const activityQTerms = activityQ ? activityTerms(activityQ) : [];
   const maxDays = Number.isFinite(Number(trip_length_days)) && Number(trip_length_days) > 0 ? Number(trip_length_days) : null;
 
   const matchesActivity = (a) => {
+    if (!activityQ) return true;
     const act = norm(a.activity);
-    if (!act) return false; // never match records with no activity on a blank prefix
-    return act.includes(activityQ) || activityQ.includes(act);
+    if (act && activityQTerms.some((t) => act.includes(t) || t.includes(act))) return true;
+    // The editorial title/description is the only signal on sparse live records.
+    const text = textOf(a, ['title', 'description', 'category']);
+    return activityQTerms.some((t) => containsTerm(text, t));
+  };
+  const matchesRegion = (a) => {
+    if (!regionParts.length) return true;
+    const text = textOf(a, ['region', 'destination', 'country', 'title', 'description']);
+    return regionParts.some((t) => containsTerm(text, t));
+  };
+  const landscapeHits = (a) => {
+    const text = textOf(a, ['landscape', 'title', 'description']);
+    return landscapeParts.filter((t) => containsTerm(text, t)).length;
   };
 
   const catalog = await loadAdventures(extra, MOCK_DATA);
 
   let results = catalog.filter((a) => {
     if (!matchesActivity(a)) return false;
-    if (landscapeQ && norm(a.landscape) !== landscapeQ) return false;
-    if (regionQ && !norm(a.region).includes(regionQ) && !norm(a.destination).includes(regionQ) && !norm(a.country).includes(regionQ)) return false;
+    if (!matchesRegion(a)) return false;
     if (maxDays !== null && Number.isFinite(Number(a.trip_length_days)) && Number(a.trip_length_days) > maxDays) return false;
     return true;
   });
@@ -61,11 +97,11 @@ const handler = async ({ activity = '', experience_level = '', landscape = '', p
   // Score by how well the softer preferences line up, so the strongest match leads.
   const score = (a) => {
     let s = 0;
-    if (norm(a.experience_level) === levelQ) s += 3;
+    if (levelQ && norm(a.experience_level) === levelQ) s += 3;
     if (paceQ && norm(a.pace).includes(paceQ)) s += 2;
     if (priorityQ && norm(a.priority).includes(priorityQ)) s += 2;
-    if (landscapeQ && norm(a.landscape) === landscapeQ) s += 1;
-    if (regionQ && norm(a.region).includes(regionQ)) s += 1;
+    s += landscapeHits(a);
+    if (activityQ && (norm(a.activity).includes(activityQ) || containsTerm(textOf(a, ['title', 'description']), activityQ))) s += 2;
     return s;
   };
   results = results
@@ -91,13 +127,15 @@ const handler = async ({ activity = '', experience_level = '', landscape = '', p
 
   if (adventures.length === 0) {
     return {
-      content: [{ type: 'text', text: `No published WKND adventures matched ${activity} at the ${experience_level} level with those preferences. Try widening the activity, region, or available time.` }],
+      content: [{ type: 'text', text: `No published WKND adventures matched ${activityQ ? activity : 'any activity'} at ${levelQ ? `the ${experience_level} level` : 'any experience level'} with those preferences. Try widening the activity, region, or available time.` }],
       structuredContent: { adventures: [] },
     };
   }
 
   const lead = adventures[0];
-  const summary = `Found ${adventures.length} WKND ${activity} adventure${adventures.length === 1 ? '' : 's'} suited to an ${experience_level} traveler — ${lead.title} leads the list because it best fits your stated pace, priority, and available time. Review current terrain and weather conditions before committing to any route.`;
+  const levelText = levelQ ? `an ${experience_level} traveler` : 'any experience level';
+  const activityText = activityQ ? `${activity} ` : '';
+  const summary = `Found ${adventures.length} WKND ${activityText}adventure${adventures.length === 1 ? '' : 's'} suited to ${levelText} — ${lead.title} leads the list because it best fits your stated pace, priority, and available time. Review current terrain and weather conditions before committing to any route.`;
 
   return {
     content: [{ type: 'text', text: summary }],
