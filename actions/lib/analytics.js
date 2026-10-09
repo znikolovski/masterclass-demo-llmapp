@@ -37,7 +37,7 @@
  *                     read directly by Adobe Analytics with no processing
  *                     rules or context-data key matching involved. Confirmed
  *                     free slots in this report suite (2026-09-24):
- *                       eVar10 mcpMethod   eVar13 errorClass
+ *                       eVar10 mcpMethod (action name) eVar13 errorClass
  *                       eVar11 hostSession eVar14 organizationId
  *                       eVar12 status      eVar15 userIntent
  *                       event22 durationMs event23 inputSizeBytes event24 outputSizeBytes
@@ -262,6 +262,19 @@ function withAnalytics(toolName, handler) {
 }
 
 /**
+ * When a tool's schema declares userIntent, the runtime strips it from args
+ * before the handler runs and hands it over on `extra` under a private
+ * Symbol('userIntent') (loader.js wrapHandlerStrippingUserIntent), so live
+ * calls never see args.userIntent. Fall back to that Symbol by description.
+ */
+function userIntentFrom(args, extra) {
+  if (args && typeof args === 'object' && args.userIntent !== undefined) return args.userIntent;
+  if (!extra || typeof extra !== 'object') return undefined;
+  const key = Object.getOwnPropertySymbols(extra).find((s) => s.description === 'userIntent');
+  return key ? extra[key] : undefined;
+}
+
+/**
  * Run one handler call and report it. `options` is forwarded to
  * sendMcpAnalyticsEvent; `options.onAnalytics` receives its send result.
  */
@@ -273,12 +286,12 @@ async function invokeWithAnalytics(toolName, handler, args, extra, options = {})
   };
   const startedAt = Date.now();
   const inputSize = safeSize(args);
-  const userIntent = args && typeof args === 'object' ? args.userIntent : undefined;
+  const userIntent = userIntentFrom(args, extra);
   try {
     const result = await handler(args, extra);
     await report({
       toolName,
-      mcpMethod: 'tools/call',
+      mcpMethod: toolName,
       status: 'ok',
       durationMs: Date.now() - startedAt,
       inputSize,
@@ -290,7 +303,7 @@ async function invokeWithAnalytics(toolName, handler, args, extra, options = {})
     const errorClass = (err && err.constructor && err.constructor.name) || 'Error';
     await report({
       toolName,
-      mcpMethod: 'tools/call',
+      mcpMethod: toolName,
       status: 'error',
       errorClass,
       durationMs: Date.now() - startedAt,

@@ -207,6 +207,8 @@ describe('withAnalytics', () => {
     expect(rawBody).not.toContain('hiking');
     expect(body.event.xdm._wkndmcp.mcp.status).toBe('ok');
     expect(body.event.xdm._wkndmcp.mcp.toolName).toBe('discover_adventures');
+    expect(body.event.xdm._wkndmcp.mcp.mcpMethod).toBe('discover_adventures');
+    expect(body.event.data.__adobe.analytics.eVar10).toBe('discover_adventures');
   });
 
   test('reports status=error and rethrows on handler failure, without swallowing the error', async () => {
@@ -218,6 +220,17 @@ describe('withAnalytics', () => {
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     expect(body.event.xdm._wkndmcp.mcp.status).toBe('error');
     expect(body.event.xdm._wkndmcp.mcp.errorClass).toBe('TypeError');
+  });
+
+  test('reads userIntent the runtime moved from args onto extra', async () => {
+    const handler = jest.fn(async () => ({ content: [], structuredContent: {} }));
+    const wrapped = withAnalytics('discover_adventures', handler);
+    const extra = { ...CONFIGURED_EXTRA, [Symbol('userIntent')]: 'Find trekking in Ohrid' };
+
+    await wrapped({ region: 'Ohrid' }, extra);
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.event.xdm._wkndmcp.mcp.userIntent).toBe('Find trekking in Ohrid');
+    expect(body.event.data.__adobe.analytics.eVar15).toBe('Find trekking in Ohrid');
   });
 
   // TEMP: falls back to hardcoded config when unconfigured (see readAnalyticsConfig),
