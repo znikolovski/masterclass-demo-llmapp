@@ -1,9 +1,10 @@
-// Reference routes the audit cites for route-specific necessities. Real route data
-// comes from the WKND catalogue (EDS query-index + Aero catalog) via
-// actions/lib/wknd.js; MOCK_DATA is the offline fallback. NOTE: MOCK_AUDIT below is
-// still a representative audit — a genuine item-level computation from `items` is the
-// remaining follow-up (see the note below the handler).
-const { loadAdventures } = require('../lib/wknd.js');
+// Audits the user's actual packing list: totals the supplied (or estimated) item
+// weights by category, flags comfort cuts and duplicates, proposes lighter swaps for
+// heavy items, and checks for missing essentials. The referenced route is resolved
+// from the WKND catalogue (EDS query-index + Aero catalog) via actions/lib/wknd.js;
+// MOCK_DATA is the offline fallback. Nothing route-specific is invented — a route
+// only contributes its name and any gear published in the adventure-attributes sheet.
+const { loadAdventures, loadAttributes, findAdventure } = require('../lib/wknd.js');
 const { withAnalytics } = require('../lib/analytics.js');
 
 const MOCK_DATA = [
@@ -19,38 +20,202 @@ const MOCK_DATA = [
   { adventure_id: 'ultralight-backpacking', name: 'Sub-10 lb: What to Cut', title: 'Sub-10 lb: What to Cut, What to Keep', description: 'An ultralight backpacking guide on paring a base weight below ten pounds without cutting what keeps you safe.', image_url: 'https://wknd-adventures.run.place/media_11fea14b0a8da0dcbcde423d0b4a86d48016fed3b.avif?width=1200&format=pjpg&optimize=medium', category: 'Gear Guide', activity: 'Backpacking', landscape: 'Mixed', region: 'General', experience_level: 'Intermediate', pace: 'Endurance', priority: 'Comfort / weight', trip_length_days: 4, duration: 'Multi-day', match_reason: 'Weight-optimization principles for backpackers refining a multi-day kit.' },
 ];
 
-// Representative audit result matching outputSchema. In production this is computed
-// from the user's `items` against WKND route-specific principles.
-const MOCK_AUDIT = {
-  current_weight_grams: 11800,
-  potential_weight_grams: 9450,
-  estimated_savings_grams: 2350,
-  category_breakdown: ['Shelter: 2100 g', 'Sleep system: 1850 g', 'Cook system: 1200 g', 'Clothing: 3100 g', 'Electronics: 900 g', 'Safety & navigation: 1450 g', 'Miscellaneous: 1200 g'],
-  recommended_cuts: [
-    "Second insulated jacket — 480 g — one puffy plus active layers covers the W Circuit's February range; a duplicate is redundant.",
-    'Camp chair — 620 g — refugios and established campsites provide seating; comfort item, not route-required.',
-    'Full-size camera tripod — 750 g — a compact tabletop mount saves ~600 g with minimal loss for trail photos.',
-  ],
-  possible_swaps: [
-    'Swap 2-person tent for a solo trekking-pole shelter — saves ~650 g (evidence-backed: WKND ultralight guide).',
-    'Swap canister stove + steel pot for a titanium integrated system — saves ~300 g.',
-    'Swap cotton layers for merino/synthetic — saves ~250 g and dries faster.',
-  ],
-  safety_critical_items: [
-    'Waterproof hardshell — Patagonian weather turns fast; non-negotiable.',
-    'Headlamp + spare batteries — required for pre-dawn stage starts.',
-    'First-aid kit and blister care — 9-day remote route.',
-    'Navigation (map + compass or GPS) — refugio-to-refugio routefinding.',
-  ],
-  missing_essentials: [
-    'No listed water treatment — add filter or tablets for a 9-day route.',
-    'No emergency shelter/bivy noted.',
-  ],
-  assumptions: [
-    'Weights estimated where the list omitted them.',
-    'February Patagonian shoulder-season conditions assumed.',
-  ],
-};
+// Classification rules, first match wins. `estimate` (grams per unit) is used only when
+// the list gives no weight; `cut` marks comfort items; `swap` proposes a lighter
+// equivalent once the item is heavier than `above` grams; `safety` items are never cut.
+const RULES = [
+  { key: 'emergency', category: 'Safety & navigation', re: /emergency (bivy|bivvy|blanket|shelter)|space blanket|survival bag/, estimate: 150, safety: 'emergency shelter if someone is injured or benighted' },
+  { key: 'first_aid', category: 'Safety & navigation', re: /first.?aid|medical kit|blister/, estimate: 250, safety: 'first-aid and blister care' },
+  { key: 'headlamp', category: 'Safety & navigation', re: /head ?lamp|head ?torch|flashlight|torch/, estimate: 90, safety: 'light for early starts or getting caught out after dark' },
+  { key: 'navigation', category: 'Safety & navigation', re: /\bmaps?\b|compass|\bgps\b|satellite|inreach|\bplb\b|beacon/, estimate: 120, safety: 'navigation and emergency communication' },
+  { key: 'whistle', category: 'Safety & navigation', re: /whistle/, estimate: 10, safety: 'signalling for help' },
+  { key: 'tent', category: 'Shelter', re: /tent|tarp|bivy|bivvy|hammock|shelter/, estimate: 1800, dupe: true, swap: { above: 1300, target: 'an ultralight 1-person tent or trekking-pole shelter', targetGrams: 900 } },
+  { key: 'sleeping_bag', category: 'Sleep system', re: /sleeping bag|quilt/, estimate: 1100, dupe: true, swap: { above: 1000, target: 'a down quilt of the same temperature rating', targetGrams: 700 } },
+  { key: 'pad', category: 'Sleep system', re: /sleeping pad|sleep pad|sleeping mat|\bmat\b|mattress/, estimate: 550, dupe: true, swap: { above: 500, target: 'an inflatable ultralight pad', targetGrams: 350 } },
+  { key: 'pillow', category: 'Sleep system', re: /pillow/, estimate: 120, cut: 'a stuff sack filled with spare clothing does the same job' },
+  { key: 'stove', category: 'Cook system', re: /stove|burner/, estimate: 350, dupe: true, swap: { above: 200, target: 'a minimalist canister-top stove', targetGrams: 90 } },
+  { key: 'fuel', category: 'Cook system', re: /fuel|canister|\bgas\b/, estimate: 360 },
+  { key: 'pot', category: 'Cook system', re: /\bpots?\b|\bpan\b|cookset|cook set|kettle|\bmug\b|\bcup\b/, estimate: 300, swap: { above: 250, target: 'a single titanium pot', targetGrams: 120 } },
+  { key: 'utensil', category: 'Cook system', re: /spork|spoon|fork|utensil/, estimate: 20 },
+  { key: 'water_treatment', category: 'Water', re: /filter|purif|tablets|steripen|uv pen/, estimate: 90, safety: 'safe drinking water' },
+  { key: 'water_container', category: 'Water', re: /bottle|bladder|reservoir|hydration|flask/, estimate: 150, swap: { above: 250, target: 'a 1 L soft flask or recycled PET bottle', targetGrams: 40 } },
+  { key: 'food', category: 'Food', re: /food|meal|snack|\bbars?\b|ration|dehydrated/, estimate: 700, consumable: true },
+  { key: 'shell', category: 'Clothing', re: /rain|hard ?shell|\bshell\b|waterproof|poncho/, estimate: 400, safety: 'waterproof protection against wind and rain' },
+  { key: 'cotton', category: 'Clothing', re: /cotton|jeans|denim|hoodie/, estimate: 600, swap: { above: 0, target: 'a merino or synthetic equivalent', ratio: 0.6, note: 'and it dries faster' } },
+  { key: 'insulation', category: 'Clothing', re: /puffy|down jacket|insulated|synthetic jacket|insulation/, estimate: 450, dupe: true, insulation: true },
+  { key: 'fleece', category: 'Clothing', re: /fleece|mid ?layer/, estimate: 350, insulation: true },
+  { key: 'clothing', category: 'Clothing', re: /shirt|tee\b|base ?layer|thermal|legging|trousers|pants|shorts|socks|underwear|gloves|mitts|\bhat\b|beanie|buff|jacket|vest/, estimate: 200 },
+  { key: 'footwear', category: 'Footwear', re: /boots?\b|shoes?\b|sandals?|trail runners?|gaiters?/, estimate: 900, swap: { above: 1400, target: 'trail runners (if the terrain allows)', targetGrams: 750 } },
+  { key: 'backpack', category: 'Packs & storage', re: /backpack|rucksack|\bpack\b/, estimate: 1600, dupe: true, swap: { above: 1800, target: 'a frameless or lightweight framed pack', targetGrams: 1100 } },
+  { key: 'storage', category: 'Packs & storage', re: /dry ?bag|stuff sack|pack liner|rain cover/, estimate: 80 },
+  { key: 'tripod', category: 'Electronics', re: /tripod/, estimate: 750, cut: 'a compact tabletop mount or a rock does the job for trail photos' },
+  { key: 'luxury_tech', category: 'Electronics', re: /drone|speaker|laptop|tablet|ipad/, estimate: 600, cut: 'comfort item, not needed for the route' },
+  { key: 'electronics', category: 'Electronics', re: /phone|power ?bank|battery|charger|cable|camera|e-?reader|kindle|watch|radio/, estimate: 200 },
+  { key: 'sun', category: 'Personal care', re: /sunscreen|\bspf\b|sunglasses|sun ?hat|lip balm/, estimate: 100 },
+  { key: 'towel', category: 'Personal care', re: /towel/, estimate: 350, swap: { above: 200, target: 'a microfibre towel', targetGrams: 90 } },
+  { key: 'toiletries', category: 'Personal care', re: /toothbrush|toothpaste|toiletr|soap|toilet paper|trowel|sanitiser|sanitizer|wipes/, estimate: 150 },
+  { key: 'comfort', category: 'Miscellaneous', re: /chair|stool|camp table|book|novel|paperback|guitar|lantern|cast iron|hatchet|\baxe\b|machete|cooler/, estimate: 600, cut: 'comfort item, not route-required' },
+  { key: 'poles', category: 'Miscellaneous', re: /trekking poles?|hiking poles?|\bpoles?\b/, estimate: 450 },
+  { key: 'knife', category: 'Miscellaneous', re: /knife|multi-?tool/, estimate: 100 },
+];
+const DEFAULT_RULE = { key: 'other', category: 'Miscellaneous', estimate: 200 };
+
+const UNIT_GRAMS = { g: 1, gram: 1, grams: 1, kg: 1000, kgs: 1000, oz: 28.35, lb: 453.6, lbs: 453.6 };
+
+function parseWeight(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+  if (typeof value !== 'string') return null;
+  const m = value.toLowerCase().match(/(\d+(?:[.,]\d+)?)\s*(kgs?|grams?|g|oz|lbs?)\b/);
+  if (!m) return null;
+  return parseFloat(m[1].replace(',', '.')) * UNIT_GRAMS[m[2]];
+}
+
+function normalizeItem(raw) {
+  if (typeof raw === 'string') {
+    const text = raw.trim();
+    if (!text) return null;
+    const qty = text.match(/^(\d+)\s*x\s+|\s+x\s*(\d+)\b/i);
+    const name = text
+      .replace(/^(\d+)\s*x\s+/i, '')
+      .replace(/\s+x\s*\d+\b/i, '')
+      .replace(/[\s(—–:-]*\d+(?:[.,]\d+)?\s*(kgs?|grams?|g|oz|lbs?)\b\)?/i, '')
+      .trim() || text;
+    return { name, quantity: qty ? Number(qty[1] || qty[2]) : 1, weight: parseWeight(text) };
+  }
+  if (!raw || typeof raw !== 'object') return null;
+  const name = String(raw.name || raw.item || raw.title || '').trim();
+  if (!name) return null;
+  const qty = Number(raw.quantity ?? raw.qty ?? raw.count ?? 1);
+  let weight = parseWeight(raw.weight_grams ?? raw.weight_g ?? raw.grams);
+  if (weight == null && raw.weight_kg != null) weight = Number(raw.weight_kg) * 1000 || null;
+  if (weight == null && raw.weight_oz != null) weight = Number(raw.weight_oz) * UNIT_GRAMS.oz || null;
+  if (weight == null && raw.weight != null) weight = parseWeight(typeof raw.weight === 'number' ? `${raw.weight} g` : raw.weight);
+  return {
+    name,
+    quantity: Number.isFinite(qty) && qty > 0 ? Math.round(qty) : 1,
+    weight,
+    category: typeof raw.category === 'string' ? raw.category.trim() : '',
+  };
+}
+
+const fmt = (g) => (g >= 1000 ? `${(g / 1000).toFixed(2)} kg` : `${Math.round(g)} g`);
+
+function auditItems(rawItems, ctx) {
+  const items = rawItems.map(normalizeItem).filter(Boolean).map((it) => {
+    const rule = RULES.find((r) => r.re.test(it.name.toLowerCase())) || DEFAULT_RULE;
+    const unit = it.weight != null ? it.weight : rule.estimate;
+    return {
+      ...it, rule, estimated: it.weight == null, unitGrams: unit, totalGrams: unit * it.quantity,
+    };
+  });
+
+  const byCategory = new Map();
+  for (const it of items) {
+    const cat = it.rule === DEFAULT_RULE && it.category ? it.category : it.rule.category;
+    byCategory.set(cat, (byCategory.get(cat) || 0) + it.totalGrams);
+  }
+  const current = Math.round(items.reduce((sum, it) => sum + it.totalGrams, 0));
+
+  const cuts = [];
+  const swaps = [];
+  const safety = [];
+  const handled = new Set();
+  const tripLabel = `${ctx.days}-day ${ctx.activity}${ctx.routeName ? ` on ${ctx.routeName}` : ''}`;
+
+  // Duplicates of single-carry items (tents, bags, stoves, packs, puffies).
+  const groups = new Map();
+  for (const it of items) {
+    if (it.rule.dupe) groups.set(it.rule.key, [...(groups.get(it.rule.key) || []), it]);
+  }
+  for (const [, group] of groups) {
+    const units = group.reduce((n, it) => n + it.quantity, 0);
+    if (units < 2) continue;
+    const keep = group.reduce((a, b) => (b.unitGrams > a.unitGrams ? b : a));
+    for (const it of group) {
+      const extra = it === keep ? it.quantity - 1 : it.quantity;
+      if (extra <= 0) continue;
+      const grams = it.unitGrams * extra;
+      cuts.push({ grams, text: `${extra > 1 ? `${extra} × ` : ''}${it.name} — ${fmt(grams)} — duplicates your ${keep.name}; carry one unless it is shared gear for a partner.` });
+      handled.add(it);
+    }
+  }
+
+  for (const it of items) {
+    const { rule } = it;
+    if (rule.safety || (rule.insulation && ctx.cold)) {
+      safety.push(`${it.name} — ${rule.safety || 'warm layer for cold conditions'}.`);
+    }
+    if (handled.has(it)) continue;
+    if (rule.cut && !rule.safety) {
+      cuts.push({ grams: it.totalGrams, text: `${it.name} — ${fmt(it.totalGrams)} — ${rule.cut}.` });
+      continue;
+    }
+    if (rule.swap && it.unitGrams > rule.swap.above) {
+      const { swap } = rule;
+      const lighter = swap.ratio ? it.unitGrams * swap.ratio : swap.targetGrams;
+      const saving = Math.round((it.unitGrams - lighter) * it.quantity);
+      if (saving >= 50) {
+        swaps.push({
+          grams: saving,
+          text: `Swap ${it.name} (${fmt(it.totalGrams)}) for ${swap.target} — saves ~${fmt(saving)}${swap.note ? ` ${swap.note}` : ''}.`,
+        });
+      }
+    }
+  }
+  cuts.sort((a, b) => b.grams - a.grams);
+  swaps.sort((a, b) => b.grams - a.grams);
+  const savings = Math.min(current, Math.round([...cuts, ...swaps].reduce((s, c) => s + c.grams, 0)));
+
+  const has = (...keys) => items.some((it) => keys.includes(it.rule.key));
+  const missing = [];
+  if (!has('water_treatment')) missing.push(`No water treatment listed — add a filter or purification tablets for a ${ctx.days}-day trip.`);
+  if (!has('first_aid')) missing.push('No first-aid kit listed — add one with blister care.');
+  if (!has('navigation')) missing.push('No navigation listed — add a map and compass or a GPS with offline maps.');
+  if (!has('headlamp')) missing.push('No headlamp listed — add one with spare batteries.');
+  if (!has('shell') && (ctx.wet || ctx.mountain)) missing.push(`No waterproof shell listed — ${ctx.wet ? 'rain is expected' : 'mountain weather can turn quickly'}.`);
+  if (!has('insulation', 'fleece') && ctx.cold) missing.push('No warm insulating layer listed for cold conditions.');
+  if (!has('emergency', 'tent') && ctx.days > 1) missing.push('No emergency shelter or bivy listed.');
+  if (!has('sun')) missing.push('No sun protection listed (sunscreen, sunglasses).');
+  for (const gear of ctx.routeGear) {
+    const g = gear.toLowerCase();
+    if (!items.some((it) => it.name.toLowerCase().includes(g) || g.includes(it.name.toLowerCase()))) {
+      missing.push(`WKND's ${ctx.routeName || 'route'} gear list includes ${gear}, which isn't on your list.`);
+    }
+  }
+
+  const estimated = items.filter((it) => it.estimated).map((it) => it.name);
+  const assumptions = [];
+  if (estimated.length) {
+    const shown = estimated.slice(0, 6).join(', ');
+    assumptions.push(`Typical weights estimated for ${estimated.length} item(s) without a listed weight: ${shown}${estimated.length > 6 ? ', …' : ''}.`);
+  }
+  if (items.some((it) => it.rule.consumable)) assumptions.push('Food and fuel are included in the current weight but never counted as cuts.');
+  if (!has('tent') && ctx.days > 1) assumptions.push('No tent listed — assumed hut, guesthouse, or hotel stays.');
+  assumptions.push(ctx.routeName
+    ? `Route: ${ctx.routeName} (WKND catalogue).`
+    : `No WKND route matched${ctx.adventureRef ? ` "${ctx.adventureRef}"` : ''} — general ${ctx.activity} principles applied.`);
+  if (ctx.season || ctx.conditions) {
+    assumptions.push(`Conditions as provided: ${[ctx.season, ctx.conditions].filter(Boolean).join(', ')}.`);
+  }
+  if (ctx.packReferenceKg) assumptions.push(`WKND reference pack weight for this route: ${ctx.packReferenceKg} kg.`);
+
+  return {
+    tripLabel,
+    itemCount: items.length,
+    current_weight_grams: current,
+    potential_weight_grams: current - savings,
+    estimated_savings_grams: savings,
+    category_breakdown: [...byCategory.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([cat, grams]) => `${cat}: ${Math.round(grams)} g`),
+    recommended_cuts: cuts.map((c) => c.text),
+    possible_swaps: swaps.map((c) => c.text),
+    safety_critical_items: safety,
+    missing_essentials: missing,
+    assumptions,
+    biggest: [...cuts, ...swaps].sort((a, b) => b.grams - a.grams)[0] || null,
+  };
+}
 
 const EMPTY_AUDIT = {
   current_weight_grams: null,
@@ -92,25 +257,47 @@ const handler = async ({
     };
   }
 
-  // Preserve the referenced route (if any) so route-specific necessities stay in scope.
-  const catalog = await loadAdventures(extra, MOCK_DATA);
-  const route = adventure_id
-    ? catalog.find((r) => r.adventure_id === adventure_id)
-    : null;
+  const [catalog, attributes] = await Promise.all([
+    loadAdventures(extra, MOCK_DATA),
+    loadAttributes(extra).catch(() => ({})),
+  ]);
+  const route = findAdventure(catalog, adventure_id);
+  const attrs = (route && attributes[route.adventure_id]) || {};
+  const conditionText = `${season} ${conditions}`.toLowerCase();
+  const terrainText = `${activity} ${conditions} ${route ? `${route.landscape || ''} ${route.title || ''}` : ''}`.toLowerCase();
 
-  // Representative audit result. A real item-level computation from `items` (summing
-  // weights, matching cuts/swaps against route necessities) is the remaining follow-up.
-  const audit = MOCK_AUDIT;
+  const audit = auditItems(items, {
+    days: Math.max(1, Math.round(duration_days)),
+    activity: activity.trim(),
+    adventureRef: String(adventure_id || '').trim(),
+    routeName: route ? (route.title || route.name) : '',
+    routeGear: Array.isArray(attrs.gear) ? attrs.gear : [],
+    packReferenceKg: attrs.pack_reference_kg || null,
+    season: String(season || '').trim(),
+    conditions: String(conditions || '').trim(),
+    cold: /cold|snow|ice|icy|freez|winter|sub-?zero|frost/.test(conditionText),
+    wet: /wet|rain|storm|shower|monsoon|damp/.test(conditionText),
+    mountain: /mountain|alpine|trek|hik|summit|ridge|peak/.test(terrainText),
+  });
 
-  const savingsKg = (audit.estimated_savings_grams / 1000).toFixed(1);
-  const dangerNote = audit.missing_essentials && audit.missing_essentials.length
-    ? ` Dangerous omission to fix first: ${audit.missing_essentials[0]}`
+  if (audit.itemCount === 0) {
+    return {
+      content: [{ type: 'text', text: 'None of the listed items could be read — provide item names (and weights if known).' }],
+      structuredContent: { ...EMPTY_AUDIT },
+    };
+  }
+
+  const kg = (g) => (g / 1000).toFixed(1);
+  const biggest = audit.biggest
+    ? ` Biggest single saving: ${audit.biggest.text.split(' — ')[0]} (~${fmt(audit.biggest.grams)}).`
+    : ' No clear cuts or swaps found — the list is already lean for this trip.';
+  const dangerNote = audit.missing_essentials.length
+    ? ` Fix first: ${audit.missing_essentials[0]}`
     : '';
-  const routeNote = route ? ` against the ${route.name} route.` : '.';
-  const summary = `Audited ${items.length} item(s) for a ${duration_days}-day ${activity.trim()} trip${routeNote} `
-    + `Biggest realistic saving is the shelter swap (~${savingsKg} kg total identified). `
-    + `Swaps marked "evidence-backed" follow WKND's ultralight guidance; unlabeled cuts are personal-judgment calls — `
-    + `keep every safety-critical item.${dangerNote}`;
+  const goalNote = goal && String(goal).trim() ? ` Goal: ${String(goal).trim()}.` : '';
+  const summary = `Audited ${audit.itemCount} item(s) for a ${audit.tripLabel}: ${kg(audit.current_weight_grams)} kg now, `
+    + `~${kg(audit.potential_weight_grams)} kg possible (saving ~${kg(audit.estimated_savings_grams)} kg).${biggest}${goalNote} `
+    + `Cuts are personal-judgment calls; keep every safety-critical item.${dangerNote}`;
 
   return {
     content: [{ type: 'text', text: summary }],
@@ -130,24 +317,4 @@ const handler = async ({
 };
 
 module.exports = withAnalytics('audit_pack_weight', handler);
-
-/*
- * TODO: Replace MOCK_AUDIT/MOCK_DATA with a real audit computation + API call.
- *
- * Suggested pattern (update based on actual site API):
- *   GET ${process.env.API_BASE_URL}/adventures/${adventure_id}
- *   Then compute weight totals from the user-supplied `items` and diff against
- *   the route's required-gear list.
- *
- * Environment variables to configure:
- *   API_BASE_URL   Base URL of the WKND API
- *   API_KEY        API key if required (add to .env and app.config.yaml)
- *
- * Example fetch:
- *   const res = await fetch(
- *     `${process.env.API_BASE_URL}/adventures/${encodeURIComponent(adventure_id)}`,
- *     { headers: { Authorization: `Bearer ${process.env.API_KEY}` } }
- *   )
- *   if (!res.ok) throw new Error(`API error: ${res.status}`)
- *   return await res.json()
- */
+module.exports.auditItems = auditItems;

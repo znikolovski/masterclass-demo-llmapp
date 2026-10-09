@@ -1,7 +1,7 @@
 // The checklist is grounded on a matched WKND route. Real route data comes from the
 // WKND catalogue (EDS query-index + Aero catalog) via actions/lib/wknd.js; MOCK_DATA
 // is the offline fallback. See the note below the handler.
-const { loadAdventures } = require('../lib/wknd.js');
+const { loadAdventures, findAdventure } = require('../lib/wknd.js');
 const { withAnalytics } = require('../lib/analytics.js');
 
 const MOCK_DATA = [
@@ -66,11 +66,10 @@ const handler = async ({
 
     // Ground terrain-specific requirements on a matched WKND route when one is referenced.
     const catalog = await loadAdventures(extra, MOCK_DATA);
-    const idKey = String(adventure_id).trim().toLowerCase();
     const actKey = activity.trim().toLowerCase();
-    const route = catalog.find((r) => r.adventure_id.toLowerCase() === idKey)
-        || catalog.find((r) => String(r.activity || '').toLowerCase() === actKey)
-        || null;
+    // Only an explicit adventure reference picks a route; never borrow another
+    // route's title just because it shares the activity.
+    const route = findAdventure(catalog, adventure_id);
 
     const cold = isCold(conditions, season);
     const wet = isWet(conditions);

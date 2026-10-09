@@ -4,7 +4,7 @@
 // (lib.submitForm -> B2B forms API) but is intentionally not auto-invoked here — this
 // tool *prepares* a package for editorial review rather than submitting it, and the
 // B2B forms are contact/interest forms, not an editorial-submission schema.
-const { loadAdventures } = require('../lib/wknd.js');
+const { loadAdventures, findAdventure } = require('../lib/wknd.js');
 const { withAnalytics } = require('../lib/analytics.js');
 
 const MOCK_DATA = [
@@ -44,20 +44,10 @@ function firstSentence(text, maxLen) {
   return out;
 }
 
-function findRoute(catalog, destination, activity) {
-  const dest = String(destination || '').trim().toLowerCase();
-  const act = String(activity || '').trim().toLowerCase();
-  if (dest) {
-    const byDest = catalog.find((a) => String(a.destination || '').toLowerCase() === dest)
-      || catalog.find((a) => String(a.destination || '').toLowerCase().includes(dest))
-      || catalog.find((a) => String(a.name || '').toLowerCase().includes(dest));
-    if (byDest) return byDest;
-  }
-  if (act) {
-    const byAct = catalog.find((a) => String(a.activity || '').toLowerCase() === act);
-    if (byAct) return byAct;
-  }
-  return null;
+// Match on the destination only: an activity alone (e.g. "Hiking") would attach an
+// unrelated documented route's title to the contribution.
+function findRoute(catalog, destination) {
+  return findAdventure(catalog, destination);
 }
 
 function buildSections(type) {
@@ -111,7 +101,7 @@ const handler = async ({
 
   const type = canonicalType(submission_type);
   const catalog = await loadAdventures(extra, MOCK_DATA);
-  const route = findRoute(catalog, destination, activity);
+  const route = findRoute(catalog, destination);
 
   const resolvedDestination = String(destination || '').trim() || (route ? route.destination || route.name : '') || null;
   const resolvedActivity = String(activity || '').trim() || (route ? route.activity : '') || null;

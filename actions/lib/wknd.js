@@ -61,6 +61,23 @@ async function fetchJson(url) {
   }
 }
 
+/**
+ * fetch text (HTML) with a timeout. Throws on non-2xx or timeout.
+ * @param {string} url
+ * @returns {Promise<string>}
+ */
+async function fetchText(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { signal: controller.signal, headers: { Accept: 'text/html' } });
+    if (!res.ok) throw new Error(`${url} -> ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const norm = (v) => (typeof v === 'string' ? v.trim() : '');
 const isSet = (v) => norm(v).length > 0 && norm(v).toLowerCase() !== 'null' && norm(v).toLowerCase() !== 'undefined';
 
@@ -208,6 +225,159 @@ async function loadAdventures(extra, mockData = []) {
 }
 
 /**
+ * Resolve a user/model-supplied adventure reference (id, title, or place name such as
+ * "Ohrid") to one catalogue record. Exact id/title/name wins, then a record whose
+ * id/title/name/destination contains every meaningful word of the query. Never falls
+ * back to an unrelated record (e.g. the first one with the same activity).
+ * @param {object[]} catalog
+ * @param {string} query
+ * @returns {object|null}
+ */
+function findAdventure(catalog, query) {
+  const q = norm(query).toLowerCase();
+  if (!q || !Array.isArray(catalog)) return null;
+  const fields = (r) => [r.adventure_id, r.title, r.name, r.destination, r.country]
+    .filter(Boolean).map((v) => String(v).toLowerCase());
+  const exact = catalog.find((r) => fields(r).slice(0, 3).includes(q));
+  if (exact) return exact;
+  const words = q.split(/[^a-z0-9\u00c0-\u024f]+/).filter((w) => w.length >= 3);
+  if (!words.length) return null;
+  const matches = catalog.filter((r) => {
+    const hay = fields(r).join(' ').replace(/-/g, ' ');
+    return words.every((w) => hay.includes(w));
+  });
+  // Several articles can share a place name (three Ohrid stories) — prefer the
+  // bookable Aero catalogue product, which is "the adventure".
+  return matches.find((r) => r.price) || matches[0] || null;
+}
+
+const ENTITIES = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+};
+const decodeEntities = (s) => s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+  if (e[0] === '#') {
+    const code = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+    return Number.isFinite(code) ? String.fromCodePoint(code) : m;
+  }
+  return ENTITIES[e.toLowerCase()] ?? m;
+});
+const stripHtml = (h) => decodeEntities(String(h).replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+const liTexts = (h) => [...String(h).matchAll(/<li>([\s\S]*?)<\/li>/g)].map((m) => m[1]);
+const mainOf = (html) => (String(html).match(/<main>([\s\S]*?)<\/main>/) || [null, String(html)])[1];
+
+/**
+ * Extract the planning facts an EDS adventure article publishes: the
+ * `adventure-facts` block (label → bullet values), "Label: value" bullets under
+ * headings (Plan Your Visit, Fast Facts, What to Pack…), plain bullet lists under
+ * headings (What We Carried, Quick Facts), the hero tagline and the Target CTA
+ * location prefix (used to find the article's trekking-planner fragment).
+ * Lists containing links (More Stories / In the Field teasers) are ignored.
+ * @param {string} html full page or .plain.html markup
+ */
+function parseArticle(html) {
+  const main = mainOf(html);
+  const facts = [];
+  const lists = [];
+
+  const fi = main.indexOf('class="adventure-facts"');
+  if (fi >= 0) {
+    const rest = main.slice(fi + 23);
+    const end = rest.search(/<div class="|<\/main>/);
+    const block = end >= 0 ? rest.slice(0, end) : rest;
+    for (const m of block.matchAll(/<div>\s*<div>([^<]+?)<\/div>\s*<div>([\s\S]*?)<\/div>\s*<\/div>/g)) {
+      const items = liTexts(m[2]).map(stripHtml).filter(Boolean);
+      const values = items.length ? items : [stripHtml(m[2])].filter(Boolean);
+      if (values.length) facts.push({ label: stripHtml(m[1]), values, heading: 'Useful information' });
+    }
+  }
+
+  for (const m of main.matchAll(/<h([23])[^>]*>((?:(?!<\/?h[1-6])[\s\S])*?)<\/h\1>\s*<ul>([\s\S]*?)<\/ul>/g)) {
+    if (/<a\s/i.test(m[2]) || /<a\s/i.test(m[3])) continue;
+    const heading = stripHtml(m[2]);
+    const items = [];
+    for (const li of liTexts(m[3])) {
+      const strong = li.match(/^\s*<strong>([\s\S]*?)<\/strong>\s*:?\s*([\s\S]*)$/);
+      const text = stripHtml(li);
+      const kv = text.match(/^([A-Z][^:]{1,30}):\s+(.+)$/);
+      if (strong && stripHtml(strong[2])) {
+        facts.push({ label: stripHtml(strong[1]).replace(/:$/, ''), values: [stripHtml(strong[2])], heading });
+      } else if (kv) {
+        facts.push({ label: kv[1].trim(), values: [kv[2].trim()], heading });
+      } else if (text) {
+        items.push(text);
+      }
+    }
+    if (items.length) lists.push({ heading, items });
+  }
+
+  const hero = main.match(/class="hero-adventure"[\s\S]*?<div>\s*<div>([^<]+)<\/div>\s*<div>\s*<h1/);
+  const target = main.match(/data-targetlocation="([a-z0-9-]+?)-cta-mbox"/);
+  return {
+    facts,
+    lists,
+    tagline: hero ? stripHtml(hero[1]) : '',
+    target_prefix: target ? target[1] : null,
+  };
+}
+
+/**
+ * Extract a day-by-day itinerary from a `<prefix>-cf-trekking-planner` fragment,
+ * e.g. "Day 1 (16km, moderate): Velestovo to the ridge camp at 1,800m." The
+ * remaining sentences (water, elevation gain…) are returned as notes.
+ * @param {string} html
+ */
+function parseItinerary(html) {
+  const main = mainOf(html);
+  const title = stripHtml((main.match(/<h2[^>]*>([\s\S]*?)<\/h2>/) || [null, ''])[1]);
+  const para = [...main.matchAll(/<p>([\s\S]*?)<\/p>/g)].map((m) => stripHtml(m[1]))
+    .find((t) => /\bDay\s+\d+\s*\(/.test(t));
+  if (!para) return null;
+  const stages = [];
+  const rest = para.replace(/Day\s+(\d+)\s*\(([^)]*)\):\s*([^.]+)\.\s*/g, (m, n, meta, text) => {
+    stages.push({ day: Number(n), meta: meta.trim(), text: text.trim() });
+    return '';
+  });
+  if (!stages.length) return null;
+  const notes = rest.split(/(?<=\.)\s+/).map((s) => s.trim()).filter(Boolean);
+  return { title, stages, notes };
+}
+
+/**
+ * Load the real published route detail for an adventure: facts parsed from the
+ * EDS article (/blog/<id>) plus, when one exists, the day-by-day itinerary from its
+ * trekking-planner fragment (/fragments/<id|target-prefix>-cf-trekking-planner).
+ * Returns null when the article cannot be fetched.
+ * @param {object} [extra]
+ * @param {string} adventureId
+ */
+async function loadRouteDetail(extra, adventureId) {
+  const id = norm(adventureId);
+  if (!/^[a-z0-9-]+$/i.test(id)) return null;
+  const edsBase = getVar(extra, 'WKND_EDS_BASE');
+  const cacheKey = `route:${edsBase}:${id}`;
+  const hit = cache.get(cacheKey);
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
+
+  let value = null;
+  try {
+    const article = parseArticle(await fetchText(`${edsBase}/blog/${id}`));
+    const prefixes = [...new Set([id, article.target_prefix].filter(Boolean))];
+    let itinerary = null;
+    for (const p of prefixes) {
+      // eslint-disable-next-line no-await-in-loop
+      const html = await fetchText(`${edsBase}/fragments/${p}-cf-trekking-planner`).catch(() => null);
+      itinerary = html ? parseItinerary(html) : null;
+      if (itinerary) break;
+    }
+    value = { ...article, itinerary, source_url: `${edsBase}/blog/${id}` };
+  } catch {
+    value = null;
+  }
+  cache.set(cacheKey, { at: Date.now(), value });
+  return value;
+}
+
+/**
  * Optional per-adventure tabular data (gear, permits, pack reference) authored in
  * an EDS spreadsheet published at /data/adventure-attributes.json. Returns a map
  * keyed by adventure_id, or an empty map if the sheet does not exist yet.
@@ -290,9 +460,13 @@ async function submitForm(extra, slug, fields) {
 
 module.exports = {
   loadAdventures,
+  findAdventure,
+  loadRouteDetail,
   loadAttributes,
   searchFlights,
   submitForm,
   getVar,
-  _internal: { resolveImage, applyIndexRow, applyCatalogEntity },
+  _internal: {
+    resolveImage, applyIndexRow, applyCatalogEntity, parseArticle, parseItinerary,
+  },
 };

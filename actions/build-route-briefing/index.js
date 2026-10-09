@@ -7,10 +7,11 @@
 // object with the same field shape — `{}` on not-found / missing input.
 
 // Route catalogue. Real data is loaded from the WKND catalogue (EDS query-index +
-// Aero catalog) via actions/lib/wknd.js; MOCK_DATA is the offline fallback. The
-// per-route stage/permit/hazard detail (BRIEFING_DETAIL) is editorial narrative
-// keyed by adventure_id and stays local until published to the attributes sheet.
-const { loadAdventures } = require('../lib/wknd.js');
+// Aero catalog) via actions/lib/wknd.js; MOCK_DATA is the offline fallback. Route
+// detail comes from the published EDS article (facts blocks / planning bullets) and
+// its trekking-planner fragment (day-by-day stages) via loadRouteDetail();
+// BRIEFING_DETAIL holds curated editorial overrides keyed by adventure_id.
+const { loadAdventures, findAdventure, loadRouteDetail } = require('../lib/wknd.js');
 const { withAnalytics } = require('../lib/analytics.js');
 
 const MOCK_DATA = [
@@ -59,6 +60,7 @@ const BRIEFING_DETAIL = {
       '2L+ water capacity',
       'Warm insulating midlayer',
     ],
+    constraint: 'The biggest planning constraint is booking: refugios and campsites must be reserved in advance and fill early, so lock lodging before fixing dates.',
     verification_notes: [
       'Confirm refugio and campsite availability with operators before departure',
       'Recheck catamaran timetable — schedule changes seasonally',
@@ -70,46 +72,124 @@ const BRIEFING_DETAIL = {
   },
 };
 
-function findReport(catalog, query) {
-  const q = String(query).trim().toLowerCase();
-  if (!q) return null;
-  let match = catalog.find((r) => r.adventure_id.toLowerCase() === q
-    || (r.title && r.title.toLowerCase() === q)
-    || (r.name && r.name.toLowerCase() === q));
-  if (!match) {
-    match = catalog.find((r) => r.adventure_id.toLowerCase().includes(q)
-      || (r.title && r.title.toLowerCase().includes(q))
-      || (r.name && r.name.toLowerCase().includes(q)));
+// Map article fact labels (adventure-facts rows, "Label: value" bullets) onto the
+// briefing fields. First matching rule wins; unmatched facts become key_facts.
+const FIELD_RULES = [
+  ['essential_gear', /what to bring|what we carried|gear|pack|footwear|sun protection/i],
+  ['access', /getting there|access|reachable|how to get|arriv/i],
+  ['permits', /permit|entry fee|ticket/i],
+  ['water', /^water|drinking/i],
+  ['accommodation', /accommodation|lodging|where to stay|camps?$/i],
+  ['weather_window', /best time|best season|season|weather|when to go/i],
+  ['hazards', /safety|hazard|risk/i],
+];
+const LIST_FIELDS = ['hazards', 'essential_gear'];
+const CONTINENT = /\b(Europe|Balkans|Asia|Africa|Americas|North America|South America|Oceania|Alpine|Arctic)\b/;
+
+const uniq = (arr) => {
+  const seen = new Set();
+  return arr.filter((v) => {
+    const k = String(v).toLowerCase();
+    if (!v || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+};
+
+/** Turn the published article + planner fragment into briefing fields. */
+function fromArticle(detail) {
+  const out = {
+    access: [], permits: [], water: [], accommodation: [], weather_window: [],
+    hazards: [], essential_gear: [], key_facts: [], daily_stages: [],
+  };
+  if (!detail) return out;
+  for (const { label, values } of detail.facts || []) {
+    const rule = FIELD_RULES.find(([, re]) => re.test(label));
+    if (!rule) {
+      out.key_facts.push(`${label}: ${values.join('; ')}`);
+    } else if (rule[0] === 'essential_gear') {
+      values.forEach((v) => {
+        // "Trekking poles, sunscreen, swimwear" is a list; prose stays whole with its label.
+        const parts = v.split(/\s*,\s*/);
+        if (parts.length > 1 && parts.every((x) => x.length <= 40 && !/[.]/.test(x))) out.essential_gear.push(...parts);
+        else out.essential_gear.push(/what to bring|carried|gear|pack/i.test(label) ? v : `${label}: ${v}`);
+      });
+    } else if (rule[0] === 'hazards') {
+      values.forEach((v) => out.hazards.push(...v.split(/\s*;\s*/)));
+    } else {
+      out[rule[0]].push(...values);
+    }
   }
-  return match || null;
+  for (const { heading, items } of detail.lists || []) {
+    if (/carried|pack|gear|bring/i.test(heading)) out.essential_gear.push(...items);
+    else {
+      items.forEach((t) => (/\b(reachable|airport|flights?)\b/i.test(t) ? out.access : out.key_facts).push(t));
+    }
+  }
+  const it = detail.itinerary;
+  if (it && it.stages.length) {
+    out.daily_stages = it.stages.map((st) => `${st.text.charAt(0).toUpperCase()}${st.text.slice(1)}${st.meta ? ` (${st.meta})` : ''}`);
+    for (const note of it.notes) {
+      if (/water/i.test(note)) out.water.push(note);
+      else out.key_facts.push(note);
+    }
+    const km = it.stages.map((st) => Number((st.meta.match(/([\d.]+)\s*km/i) || [])[1]));
+    out.itinerary_title = it.title.replace(/\s+[—–-]\s+.*$/, '');
+    out.duration = `${it.stages.length} days${km.every(Number.isFinite) ? ` · ${km.reduce((a, b) => a + b, 0)} km` : ''}`;
+  }
+  out.region = ((detail.tagline || '').match(CONTINENT) || [])[1] || '';
+  return out;
 }
 
-function buildBriefing(report) {
+function buildBriefing(report, routeDetail) {
   const detail = BRIEFING_DETAIL[report.adventure_id] || {};
-  const missing = Array.isArray(detail.missing_information) ? detail.missing_information.slice() : [];
-  // If the report has no documented stage-level detail, say so rather than inventing it.
-  if (!Array.isArray(detail.daily_stages) || detail.daily_stages.length === 0) {
-    missing.push('This report is a narrative field guide — it does not document a day-by-day stage breakdown, access, permits, or camp logistics.');
-  }
-  return {
+  const art = fromArticle(routeDetail);
+  const sentence = (t) => (/[.!?]$/.test(t) ? t : `${t}.`);
+  const pickText = (k) => {
+    if (detail[k]) return detail[k];
+    const vals = uniq(art[k]);
+    // drop a short value already contained in a longer one (e.g. "May–September")
+    return vals.filter((v) => !vals.some((o) => o !== v && o.toLowerCase().includes(v.toLowerCase())))
+      .map(sentence).join(' ');
+  };
+  const pickList = (k, max) => uniq(Array.isArray(detail[k]) && detail[k].length ? detail[k] : art[k]).slice(0, max);
+
+  const briefing = {
     adventure_id: report.adventure_id,
     title: report.title || report.name || '',
-    region: [report.destination, report.country].filter(Boolean).join(' · ') || report.region || '',
+    region: [report.destination, report.country].filter(Boolean).join(' · ') || report.region || art.region || '',
     activity: report.activity || report.category || '',
-    duration: report.duration || (report.trip_length_days ? `${report.trip_length_days} days` : ''),
+    duration: report.duration || (report.trip_length_days ? `${report.trip_length_days} days` : '') || art.duration || '',
     verified_status: report.verified_status || '',
     last_verified_date: (report.verified_status || '').replace(/^.*·\s*/, '') || '',
-    daily_stages: Array.isArray(detail.daily_stages) ? detail.daily_stages : [],
-    access: detail.access || '',
-    permits: detail.permits || '',
-    water: detail.water || '',
-    accommodation: detail.accommodation || '',
-    weather_window: detail.weather_window || '',
-    hazards: Array.isArray(detail.hazards) ? detail.hazards : [],
-    essential_gear: Array.isArray(detail.essential_gear) ? detail.essential_gear : [],
-    verification_notes: Array.isArray(detail.verification_notes) ? detail.verification_notes : [],
-    missing_information: missing,
+    daily_stages: pickList('daily_stages', 14),
+    access: pickText('access'),
+    permits: pickText('permits'),
+    water: pickText('water'),
+    accommodation: pickText('accommodation'),
+    weather_window: pickText('weather_window'),
+    hazards: pickList('hazards', 8),
+    essential_gear: pickList('essential_gear', 12),
+    key_facts: uniq(art.key_facts).slice(0, 10),
+    verification_notes: Array.isArray(detail.verification_notes) ? detail.verification_notes.slice() : [],
+    missing_information: Array.isArray(detail.missing_information) ? detail.missing_information.slice() : [],
+    source_url: routeDetail ? routeDetail.source_url : '',
   };
+
+  if (!detail.daily_stages && art.daily_stages.length) {
+    briefing.verification_notes.push(`Stages come from the WKND ${art.itinerary_title || 'trekking planner'} — confirm camp and water availability before departure`);
+  }
+  if (!briefing.verification_notes.length && routeDetail) {
+    briefing.verification_notes.push('Details are from the published WKND article — recheck seasonal access and opening times before departure');
+  }
+  // Say what the report does not document rather than inventing it.
+  const gaps = [
+    ['daily_stages', 'a day-by-day stage breakdown'], ['access', 'access / getting there'],
+    ['permits', 'permits'], ['water', 'water sources'], ['accommodation', 'accommodation or camps'],
+    ['weather_window', 'a weather window'],
+  ].filter(([k]) => (Array.isArray(briefing[k]) ? !briefing[k].length : !briefing[k])).map(([, l]) => l);
+  if (gaps.length) briefing.missing_information.push(`This report does not document ${gaps.join(', ')}.`);
+  return briefing;
 }
 
 const handler = async (args, extra) => {
@@ -131,7 +211,7 @@ const handler = async (args, extra) => {
   // falling back to MOCK_DATA if the upstreams are unreachable. The narrative stage
   // detail is applied from BRIEFING_DETAIL by adventure_id in buildBriefing().
   const catalog = await loadAdventures(extra, MOCK_DATA);
-  const report = findReport(catalog, adventure_id);
+  const report = findAdventure(catalog, adventure_id);
 
   if (!report) {
     return {
@@ -140,7 +220,10 @@ const handler = async (args, extra) => {
     };
   }
 
-  const briefing = buildBriefing(report);
+  // Real published detail: facts from the EDS article and, where one exists, the
+  // day-by-day itinerary from its trekking-planner fragment.
+  const routeDetail = await loadRouteDetail(extra, report.adventure_id);
+  const briefing = buildBriefing(report, routeDetail);
 
   const context = [
     travel_window && `travel window ${travel_window}`,
@@ -151,17 +234,21 @@ const handler = async (args, extra) => {
   const hasStages = briefing.daily_stages.length > 0;
   // Content guidance handoff: name the route's biggest planning constraint and the
   // detail to verify closest to departure — narrative for the model, not the widget DOM.
-  const constraint = hasStages
-    ? 'The biggest planning constraint is booking: refugios and campsites must be reserved in advance and fill early, so lock lodging before fixing dates.'
-    : 'This report is a narrative field guide rather than a logged itinerary, so the biggest constraint is that no day-by-day stage, permit, or camp detail is documented — plan the schedule from a primary source.';
+  const detail = BRIEFING_DETAIL[report.adventure_id];
+  let constraint;
+  if (detail && detail.constraint) constraint = detail.constraint;
+  else if (hasStages) constraint = `The documented itinerary runs ${briefing.daily_stages.length} stages${briefing.water ? `; water: ${briefing.water.replace(/\.$/, '')}` : ''}.`;
+  else constraint = 'This report is a destination guide rather than a logged itinerary — no day-by-day stages are documented, so plan the schedule from a primary source.';
   const verifyClosest = briefing.verification_notes.length
     ? ` Closest to departure, verify: ${briefing.verification_notes.join('; ')}.`
     : '';
+  const facts = [briefing.access && `Access: ${briefing.access}`, briefing.weather_window && `When: ${briefing.weather_window}`,
+    briefing.permits && `Permits: ${briefing.permits}`].filter(Boolean).join(' ');
 
   const summary = `Route briefing for ${briefing.title}${briefing.region ? ` (${briefing.region})` : ''}`
     + `${context ? ` — ${context}` : ''}. `
     + `${hasStages ? `${briefing.daily_stages.length} daily stages documented; ${briefing.verified_status || 'verification date not stated'}.` : `${briefing.verified_status || 'No verification date stated'}.`} `
-    + `${constraint}${verifyClosest}`;
+    + `${constraint}${facts ? ` ${facts}` : ''}${verifyClosest}`;
 
   return {
     content: [{ type: 'text', text: summary }],
