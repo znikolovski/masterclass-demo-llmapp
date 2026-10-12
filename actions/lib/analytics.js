@@ -134,7 +134,7 @@ async function sendMcpAnalyticsEvent(extra, fields, options = {}) {
   if (!cfg) return null;
 
   const {
-    toolName, mcpMethod, status, errorClass, durationMs, inputSize, outputSize, userIntent,
+    toolName, mcpMethod, status, errorClass, durationMs, inputSize, outputSize, userIntent, journey,
   } = fields;
 
   const mcp = {
@@ -189,6 +189,17 @@ async function sendMcpAnalyticsEvent(extra, fields, options = {}) {
   if (Number.isFinite(mcp.inputSizeBytes)) eventPairs.push(`event23=${mcp.inputSizeBytes}`);
   if (Number.isFinite(mcp.outputSizeBytes)) eventPairs.push(`event24=${mcp.outputSizeBytes}`);
   if (eventPairs.length) analyticsVars.events = eventPairs.join(',');
+  if (journey) {
+    Object.assign(analyticsVars, {
+      eVar30: journey.id,
+      eVar31: journey.source,
+      eVar32: journey.tool,
+      eVar33: 'unassisted',
+      eVar34: 'llmAppResult',
+      eVar35: 'none',
+      events: [...eventPairs, 'event30'].join(','),
+    });
+  }
 
   // Adobe's Analytics variable mapping contract reads these fields from this
   // exact path in the Edge event payload, including for direct interact calls.
@@ -200,7 +211,7 @@ async function sendMcpAnalyticsEvent(extra, fields, options = {}) {
   const url = `https://${EDGE_INTERACT_HOST}/ee/v2/interact?dataStreamId=${encodeURIComponent(cfg.datastreamId)}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  const quiet = Boolean(options.timestamp || options.ecid || options.fetchEcid);
+  const quiet = Boolean(options.timestamp || options.ecid);
   try {
     const response = await fetch(url, {
       method: 'POST',
@@ -220,7 +231,8 @@ async function sendMcpAnalyticsEvent(extra, fields, options = {}) {
     if (!quiet) console.log('[analytics] edge interact accepted', response.status);
     const responseBody = typeof response.json === 'function' ? await response.json().catch(() => null) : null;
     return {
-      sent: true, status: response.status, ecid: ecidFromEdgeResponse(responseBody) || options.ecid, body,
+      sent: true, status: response.status, ecid: ecidFromEdgeResponse(responseBody) || options.ecid,
+      handles: responseBody?.handle, body,
     };
   } catch (err) {
     // TEMP DEBUG — remove once processing-rule mapping is confirmed working.
@@ -248,7 +260,7 @@ function ecidFromEdgeResponse(responseBody) {
  * preserves the handler's exact (args, extra) => result contract; sending
  * is awaited (bounded by FETCH_TIMEOUT_MS) so it isn't dropped by the
  * platform freezing the container right after the response is returned,
- * but never changes the returned value or a thrown error.
+ * Discovery results additionally carry private journey/Edge handoff metadata.
  * @param {string} toolName
  * @param {(args: object, extra?: object) => Promise<object>} handler
  * @returns {(args: object, extra?: object) => Promise<object>}
@@ -281,15 +293,26 @@ function userIntentFrom(args, extra) {
 async function invokeWithAnalytics(toolName, handler, args, extra, options = {}) {
   const { onAnalytics, ...sendOptions } = options;
   const report = async (fields) => {
-    const outcome = await sendMcpAnalyticsEvent(extra, fields, sendOptions);
+    const outcome = await sendMcpAnalyticsEvent(extra, fields, {
+      ...sendOptions, fetchEcid: sendOptions.fetchEcid ?? Boolean(fields.journey),
+    });
     if (onAnalytics) onAnalytics(outcome, fields);
+    return outcome;
   };
   const startedAt = Date.now();
   const inputSize = safeSize(args);
   const userIntent = userIntentFrom(args, extra);
   try {
     const result = await handler(args, extra);
-    await report({
+    const journey = toolName === 'discover_adventures' && result?.structuredContent?.adventures?.length
+      ? {
+        id: require('node:crypto').randomUUID(),
+        createdAt: Date.now(),
+        source: 'llm-app',
+        tool: toolName,
+        assisted: false,
+      } : undefined;
+    const outcome = await report({
       toolName,
       mcpMethod: toolName,
       status: 'ok',
@@ -297,7 +320,21 @@ async function invokeWithAnalytics(toolName, handler, args, extra, options = {})
       inputSize,
       outputSize: safeSize(result),
       userIntent,
+      journey,
     });
+    if (journey) {
+      const cfg = readAnalyticsConfig(extra);
+      const edge = outcome?.sent && /^\d{1,38}$/.test(outcome.ecid) ? {
+        datastreamId: cfg.datastreamId,
+        orgId: cfg.orgId,
+        identityMap: { ECID: [{ id: outcome.ecid, authenticatedState: 'ambiguous', primary: true }] },
+        handles: outcome.handles,
+      } : undefined;
+      return {
+        ...result,
+        _meta: { ...result._meta, wkndJourney: journey, ...(edge ? { wkndEdge: edge } : {}) },
+      };
+    }
     return result;
   } catch (err) {
     const errorClass = (err && err.constructor && err.constructor.name) || 'Error';
