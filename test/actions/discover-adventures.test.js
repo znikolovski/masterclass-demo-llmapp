@@ -1,3 +1,8 @@
+jest.mock('../../actions/lib/wknd.js', () => ({
+  loadAdventures: jest.fn(async (_extra, fallback) => fallback),
+}));
+jest.mock('../../actions/lib/analytics.js', () => ({ withAnalytics: (_name, handler) => handler }));
+
 const handler = require('../../actions/discover-adventures/index.js');
 
 describe('discover_adventures handler', () => {
@@ -23,16 +28,49 @@ describe('discover_adventures handler', () => {
     expect(Array.isArray(out.structuredContent.adventures)).toBe(true);
   });
 
-  test('returns error message when activity is missing', async () => {
+  test('filters by level without requiring an activity', async () => {
     const out = await handler({ experience_level: 'Advanced' });
-    expect(out.content[0].text).toMatch(/activity|provide/i);
-    expect(out.structuredContent.adventures).toEqual([]);
+    expect(out.structuredContent.adventures.length).toBeGreaterThan(0);
+    expect(out.structuredContent.adventures.every((a) => a.experience_level === 'Advanced')).toBe(true);
   });
 
-  test('returns error message when experience_level is missing', async () => {
+  test('filters by activity without requiring a level', async () => {
     const out = await handler({ activity: 'Hiking' });
-    expect(out.content[0].text).toMatch(/experience_level|provide/i);
-    expect(out.structuredContent.adventures).toEqual([]);
+    expect(out.structuredContent.adventures.length).toBeGreaterThan(0);
+    expect(out.structuredContent.adventures.map((a) => a.experience_level))
+      .toEqual(expect.arrayContaining(['Advanced', 'Intermediate']));
+  });
+
+  test.each([undefined, {}, { activity: 'all categories', experience_level: 'all levels' }])(
+    'lists the full catalog for %j', async (args) => {
+      const out = await handler(args);
+      expect(out.structuredContent.adventures).toHaveLength(10);
+      expect(out.structuredContent.ranked).toBe(false);
+      expect(out.content[0].text).toContain('across all categories');
+      out.structuredContent.adventures.forEach((a) => {
+        expect(out.content[0].text).toContain(a.adventure_id);
+      });
+    },
+  );
+
+  test('region-only Europe browsing works across activities', async () => {
+    const out = await handler({ region: 'Europe' });
+    expect(out.structuredContent.adventures.map((a) => a.adventure_id))
+      .toEqual(expect.arrayContaining(['kayaking-norway', 'alpine-cycling']));
+    expect(out.structuredContent.adventures.some((a) => a.adventure_id === 'patagonia-trek')).toBe(false);
+  });
+
+  test('beginner-only discovery never ranks advanced adventures into the results', async () => {
+    const out = await handler({ experience_level: 'beginner' });
+    expect(out.structuredContent.adventures.map((a) => a.adventure_id))
+      .toEqual(['yosemite-rock-climbing', 'wild-swimming-guide']);
+    expect(out.structuredContent.ranked).toBe(false);
+  });
+
+  test('preserves preference ranking within the filtered results', async () => {
+    const out = await handler({ experience_level: 'advanced', priority: 'Technical challenge' });
+    expect(out.structuredContent.adventures[0].adventure_id).toBe('winter-mountaineering');
+    expect(out.structuredContent.ranked).toBe(true);
   });
 
   test('reminds users to review current conditions before committing', async () => {

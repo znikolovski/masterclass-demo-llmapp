@@ -123,7 +123,7 @@ const CATEGORY_ACTIVITY = {
   desert: 'Desert Trekking',
   'winter-alpine': 'Winter Mountaineering',
   photography: 'Photography',
-  'general-outdoor': 'Hiking',
+  'general-outdoor': 'General Outdoor',
 };
 
 /** merge an EDS query-index row (source of truth for scalars) into a record */
@@ -177,20 +177,29 @@ function applyCatalogEntity(rec, e, edsBase) {
  * Load the WKND adventure catalogue as an array of records in the shape the tools
  * expect. Real EDS/catalog data is merged over the supplied MOCK_DATA, keyed by
  * adventure_id, with EDS winning for scalars and the catalog adding commerce fields.
- * On any failure the mock data is returned unchanged.
+ * On upstream failure, callers may opt out of the legacy offline fallback.
  *
  * @param {object} [extra]
  * @param {object[]} [mockData]
+ * @param {{includePageMetadata?: boolean, allowOfflineFallback?: boolean}} [options]
  * @returns {Promise<object[]>}
  */
-async function loadAdventures(extra, mockData = []) {
+async function loadAdventures(extra, mockData = [], {
+  includePageMetadata = false, allowOfflineFallback = true,
+} = {}) {
   const edsBase = getVar(extra, 'WKND_EDS_BASE');
   const catalogBase = getVar(extra, 'WKND_CATALOG_BASE');
-  const cacheKey = `adventures:${edsBase}:${catalogBase}`;
+  const cacheKey = `adventures:${edsBase}:${catalogBase}:${includePageMetadata}`;
   const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
 
-  const byId = new Map(mockData.map((r) => [r.adventure_id, { ...r }]));
+  const fallbackById = new Map(mockData.map((r) => {
+    const rec = { ...r };
+    // A safety/suitability filter must use published levels, not demo defaults.
+    if (includePageMetadata) delete rec.experience_level;
+    return [r.adventure_id, rec];
+  }));
+  const byId = new Map();
 
   try {
     const [index, catalog] = await Promise.all([
@@ -204,22 +213,37 @@ async function loadAdventures(extra, mockData = []) {
       if (!/^\/blog\//.test(path)) continue;
       const id = path.replace(/^\/blog\//, '').replace(/\/$/, '');
       if (!id) continue;
-      const rec = byId.get(id) || { adventure_id: id };
+      const rec = byId.get(id) || { ...fallbackById.get(id), adventure_id: id };
       applyIndexRow(rec, row, edsBase);
       byId.set(id, rec);
     }
     for (const e of (catalog && catalog.data) || []) {
       const id = norm(e.sku);
       if (!id) continue;
-      const rec = byId.get(id) || { adventure_id: id };
+      const rec = byId.get(id) || { ...fallbackById.get(id), adventure_id: id };
       applyCatalogEntity(rec, e, edsBase);
       byId.set(id, rec);
     }
 
     const value = [...byId.values()];
+    if (includePageMetadata) {
+      await Promise.all(value.map(async (rec) => {
+        if (!/^[a-z0-9-]+$/i.test(rec.adventure_id)) return;
+        try {
+          const html = await fetchText(`${edsBase}/blog/${rec.adventure_id}`);
+          applyPageMetadata(rec, html, edsBase);
+        } catch (error) {
+          console.warn('WKND discovery page metadata unavailable.', {
+            adventureId: rec.adventure_id, error: error.name,
+          });
+        }
+      }));
+    }
     cache.set(cacheKey, { at: Date.now(), value });
     return value;
-  } catch {
+  } catch (error) {
+    if (!allowOfflineFallback) throw new Error('Unable to load the published WKND adventure catalog.', { cause: error });
+    console.warn('WKND adventure catalog unavailable; using offline data.', { error: error.name });
     return mockData;
   }
 }
@@ -264,6 +288,32 @@ const decodeEntities = (s) => s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) 
 const stripHtml = (h) => decodeEntities(String(h).replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
 const liTexts = (h) => [...String(h).matchAll(/<li>([\s\S]*?)<\/li>/g)].map((m) => m[1]);
 const mainOf = (html) => (String(html).match(/<main>([\s\S]*?)<\/main>/) || [null, String(html)])[1];
+
+// Read only authored head metadata, never infer suitability from incidental prose.
+function applyPageMetadata(rec, html, base) {
+  const head = (String(html).match(/<head\b[^>]*>([\s\S]*?)<\/head>/i) || [null, ''])[1];
+  const properties = {
+    adventurecategory: 'adventureCategory', experiencelevel: 'experienceLevel',
+    region: 'region', country: 'country', placename: 'placeName', duration: 'duration',
+    triplengthdays: 'tripLengthDays', pace: 'pace', priority: 'priority',
+    landscape: 'landscape', verifiedstatus: 'verifiedStatus',
+  };
+  const row = {};
+  for (const tag of head.match(/<meta\b[^>]*>/gi) || []) {
+    const attrs = {};
+    for (const match of tag.matchAll(/([\w-]+)\s*=\s*(["'])([\s\S]*?)\2/g)) {
+      attrs[match[1].toLowerCase()] = decodeEntities(match[3]);
+    }
+    const key = properties[(attrs.name || '').toLowerCase()];
+    if (key && isSet(attrs.content)) row[key] = attrs.content;
+  }
+  applyIndexRow(rec, row, base);
+  if (!isSet(rec.region)) {
+    const { tagline } = parseArticle(html);
+    const region = tagline.match(/\b(Europe|Americas|Asia|Africa|Oceania)\b/i);
+    if (region) rec.region = region[1];
+  }
+}
 
 /**
  * Extract the planning facts an EDS adventure article publishes: the
@@ -467,6 +517,6 @@ module.exports = {
   submitForm,
   getVar,
   _internal: {
-    resolveImage, applyIndexRow, applyCatalogEntity, parseArticle, parseItinerary,
+    resolveImage, applyIndexRow, applyCatalogEntity, applyPageMetadata, parseArticle, parseItinerary,
   },
 };

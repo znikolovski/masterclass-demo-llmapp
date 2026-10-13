@@ -1,6 +1,6 @@
 // Real data comes from the WKND catalogue (EDS query-index + Aero catalog) via
-// actions/lib/wknd.js. MOCK_DATA is retained as the offline fallback used when the
-// upstream APIs are unreachable. See the note below the handler.
+// actions/lib/wknd.js. MOCK_DATA fills optional display fields on published
+// records, but discovery never returns an offline mock catalog.
 const { loadAdventures } = require('../lib/wknd.js');
 const { withAnalytics } = require('../lib/analytics.js');
 
@@ -20,45 +20,57 @@ const MOCK_DATA = [
 const norm = (v) => (typeof v === 'string' ? v.trim().toLowerCase() : '');
 
 // Hosts often pass "any" / "all levels" style values instead of omitting a preference.
-const WILDCARDS = new Set(['any', 'all', 'all levels', 'any level', 'anything', 'either', 'flexible', 'no preference', 'not sure', 'n/a']);
+const WILDCARDS = new Set(['any', 'all', 'all activities', 'any activity', 'all categories', 'any category', 'all levels', 'any level', 'all experience levels', 'anything', 'either', 'flexible', 'no preference', 'not sure', 'n/a']);
 const pref = (v) => (WILDCARDS.has(norm(v)) ? '' : norm(v));
 
-// Live catalogue records often carry only a coarse activity (general-outdoor -> Hiking),
-// so equivalent terms must match each other.
 const ACTIVITY_SYNONYMS = [
   ['hiking', 'hike', 'trekking', 'trek', 'walking', 'backpacking', 'rambling'],
-  ['water', 'surfing', 'surf', 'kayaking', 'kayak', 'paddling', 'swimming', 'wild swimming'],
+  ['surfing', 'surf'],
+  ['kayaking', 'kayak', 'paddling'],
+  ['swimming', 'wild swimming'],
   ['climbing', 'rock climbing', 'scrambling', 'bouldering'],
   ['cycling', 'biking', 'bike', 'bikepacking'],
+  ['winter-alpine', 'winter mountaineering', 'mountaineering'],
+  ['desert', 'desert trekking'],
 ];
 const activityTerms = (q) => {
-  const group = ACTIVITY_SYNONYMS.find((g) => g.some((t) => q === t || q.includes(t)));
+  const group = ACTIVITY_SYNONYMS.find((g) => g.includes(q));
   return group ? [q, ...group] : [q];
 };
+
+const CATEGORY_SYNONYMS = {
+  trekking: ['trekking', 'hiking', 'backpacking', 'walking'],
+  water: ['water', 'surfing', 'surf', 'kayaking', 'kayak', 'paddling', 'swimming', 'wild swimming'],
+  climbing: ['climbing', 'rock climbing', 'bouldering', 'scrambling'],
+  cycling: ['cycling', 'biking', 'bikepacking'],
+  desert: ['desert', 'desert trekking'],
+  'winter-alpine': ['winter-alpine', 'winter mountaineering', 'mountaineering'],
+  photography: ['photography'],
+  'general-outdoor': ['general-outdoor', 'general outdoor'],
+};
+const canonicalCategory = (value) => (
+  Object.keys(CATEGORY_SYNONYMS).find((key) => CATEGORY_SYNONYMS[key].includes(norm(value))) || norm(value)
+);
+const categoriesOf = (a) => norm(a.category).split(/[,;/&]/).map(canonicalCategory).filter(Boolean);
+const EUROPE_LOCATIONS = ['europe', 'european', 'alps', 'balkans', 'france', 'french', 'norway', 'norwegian', 'switzerland', 'swiss', 'italy', 'italian', 'dolomites', 'uk', 'united kingdom', 'britain', 'british', 'lake district', 'macedonia'];
 
 const STOP_WORDS = new Set(['and', 'or', 'the', 'with', 'near', 'in', 'of', 'a', 'an']);
 // "mountains, lake, and national park" -> ['mountains', 'lake', 'national park'] (singularized check below)
 const phraseParts = (q) => q.split(/,|\band\b|\bor\b|\//).map((t) => t.trim())
   .filter((t) => t.length >= 3 && !STOP_WORDS.has(t));
 const textOf = (a, keys) => keys.map((k) => norm(a[k])).join(' ');
-const containsTerm = (text, term) => text.includes(term) || (term.endsWith('s') && text.includes(term.slice(0, -1)));
+const containsTerm = (text, term) => {
+  const words = text.replace(/[^a-z0-9]+/g, ' ').trim();
+  const query = term.replace(/[^a-z0-9]+/g, ' ').trim();
+  if (!query) return false;
+  const padded = ` ${words} `;
+  return padded.includes(` ${query} `) || (query.endsWith('s') && padded.includes(` ${query.slice(0, -1)} `));
+};
 
-const handler = async ({ activity = '', experience_level = '', landscape = '', pace = '', priority = '', trip_length_days, region = '', intent = '' } = {}, extra) => {
-  if (!activity || typeof activity !== 'string' || !activity.trim()) {
-    return {
-      content: [{ type: 'text', text: 'Please provide an activity (e.g. hiking, surfing, cycling) to match adventures.' }],
-      // structuredContent.adventures — bare array outputSchema; key derived from actionName "discover_adventures"
-      structuredContent: { adventures: [] },
-    };
-  }
-  if (!experience_level || typeof experience_level !== 'string' || !experience_level.trim()) {
-    return {
-      content: [{ type: 'text', text: 'Please provide an experience_level (e.g. beginner, intermediate, advanced) to match adventures.' }],
-      structuredContent: { adventures: [] },
-    };
-  }
+const handler = async ({ activity = '', category = '', experience_level = '', landscape = '', pace = '', priority = '', trip_length_days, region = '', intent = '' } = {}, extra) => {
   const handoffIntent = typeof intent === 'string' ? intent.trim() : '';
   const activityQ = pref(activity);
+  const categoryQ = canonicalCategory(pref(category));
   const levelQ = pref(experience_level);
   const landscapeParts = phraseParts(pref(landscape));
   const paceQ = pref(pace);
@@ -69,26 +81,36 @@ const handler = async ({ activity = '', experience_level = '', landscape = '', p
 
   const matchesActivity = (a) => {
     if (!activityQ) return true;
+    if (activityQ === 'water') return categoriesOf(a).includes('water');
     const act = norm(a.activity);
-    if (act && activityQTerms.some((t) => act.includes(t) || t.includes(act))) return true;
-    // The editorial title/description is the only signal on sparse live records.
+    if (act && act !== 'general outdoor' && activityQTerms.some((t) => containsTerm(act, t))) return true;
+    if (activityQTerms.includes('trekking') && categoriesOf(a).includes('trekking')) return true;
+    // Coarse Water/General Outdoor labels need specific editorial activity evidence.
     const text = textOf(a, ['title', 'description', 'category']);
     return activityQTerms.some((t) => containsTerm(text, t));
   };
   const matchesRegion = (a) => {
     if (!regionParts.length) return true;
-    const text = textOf(a, ['region', 'destination', 'country', 'title', 'description']);
-    return regionParts.some((t) => containsTerm(text, t));
+    const text = textOf(a, ['region', 'destination', 'country', 'title']);
+    return regionParts.some((t) => (
+      ['europe', 'european'].includes(t)
+        ? EUROPE_LOCATIONS.some((place) => containsTerm(text, place))
+        : containsTerm(text, t)
+    ));
   };
   const landscapeHits = (a) => {
     const text = textOf(a, ['landscape', 'title', 'description']);
     return landscapeParts.filter((t) => containsTerm(text, t)).length;
   };
 
-  const catalog = await loadAdventures(extra, MOCK_DATA);
+  const catalog = await loadAdventures(extra, MOCK_DATA, {
+    includePageMetadata: true, allowOfflineFallback: false,
+  });
 
   let results = catalog.filter((a) => {
     if (!matchesActivity(a)) return false;
+    if (categoryQ && !categoriesOf(a).includes(categoryQ)) return false;
+    if (levelQ && !containsTerm(norm(a.experience_level), levelQ)) return false;
     if (!matchesRegion(a)) return false;
     if (maxDays !== null && Number.isFinite(Number(a.trip_length_days)) && Number(a.trip_length_days) > maxDays) return false;
     return true;
@@ -114,6 +136,7 @@ const handler = async ({ activity = '', experience_level = '', landscape = '', p
     title: a.title,
     region: a.region,
     activity: a.activity,
+    category: a.category || '',
     duration: a.duration,
     experience_level: a.experience_level,
     physical_demand: a.physical_demand ?? null,
@@ -123,24 +146,28 @@ const handler = async ({ activity = '', experience_level = '', landscape = '', p
     match_reason: a.match_reason,
     summary: a.description ?? '',
     image_url: a.image_url,
+    editorial_url: a.editorial_url || '',
   }));
 
   if (adventures.length === 0) {
     return {
-      content: [{ type: 'text', text: `No published WKND adventures matched ${activityQ ? activity : 'any activity'} at ${levelQ ? `the ${experience_level} level` : 'any experience level'} with those preferences. Try widening the activity, region, or available time.` }],
-      structuredContent: { adventures: [] },
+      content: [{ type: 'text', text: `No published WKND adventures matched ${categoryQ || activityQ || 'any activity'}${regionParts.length ? ` in ${region}` : ''} at ${levelQ ? `the ${experience_level} level` : 'any experience level'} with those preferences. Adventures without a published suitability level are excluded from level-filtered results. Try widening the category, activity, region, or available time.` }],
+      structuredContent: { adventures: [], intent: handoffIntent, ranked: false },
     };
   }
 
-  const lead = adventures[0];
-  const levelText = levelQ ? `an ${experience_level} traveler` : 'any experience level';
-  const activityText = activityQ ? `${activity} ` : '';
-  const summary = `Found ${adventures.length} WKND ${activityText}adventure${adventures.length === 1 ? '' : 's'} suited to ${levelText} — ${lead.title} leads the list because it best fits your stated pace, priority, and available time. Review current terrain and weather conditions before committing to any route.`;
+  const ranked = Boolean(paceQ || priorityQ || landscapeParts.length);
+  const filterText = [categoryQ || activityQ, regionParts.length ? `in ${region}` : '',
+    levelQ ? `suitable for ${experience_level} travelers` : ''].filter(Boolean).join(' ');
+  const summary = `Found ${adventures.length} WKND adventure${adventures.length === 1 ? '' : 's'}${filterText ? ` ${filterText}` : ' across all categories'}.${ranked ? ` ${adventures[0].title} leads the list based on your stated preferences.` : ''} Review current terrain and weather conditions before committing to any route.`;
+  const listing = adventures.map((a) => (
+    `- ${a.title} [${a.adventure_id}]${a.category ? ` | Category: ${a.category}` : ''}${a.region ? ` | Region: ${a.region}` : ''}${a.experience_level ? ` | Level: ${a.experience_level}` : ''}${a.editorial_url ? ` | ${a.editorial_url}` : ''}`
+  )).join('\n');
 
   return {
-    content: [{ type: 'text', text: summary }],
+    content: [{ type: 'text', text: `${summary}\n\n${listing}` }],
     // structuredContent.adventures — bare array outputSchema; key derived from actionName "discover_adventures"
-    structuredContent: { adventures, intent: handoffIntent },
+    structuredContent: { adventures, intent: handoffIntent, ranked },
   };
 };
 
@@ -154,7 +181,8 @@ module.exports = withAnalytics('discover_adventures', handler);
  *        tripLengthDays, verifiedStatus) authored in each page's Metadata block
  *   - Aero catalog     ${WKND_CATALOG_BASE}/catalog/adventures/index.json — commerce
  *       fields (name, description, image, price, destinationIata, editorialUrl)
- * EDS wins for scalars; MOCK_DATA fills any gaps and is the fallback when both
- * upstreams are unreachable. Base URLs come from extra.variables (WKND_EDS_BASE,
+ * EDS wins for scalars; published page metadata fills index gaps. MOCK_DATA fills
+ * optional display fields, not suitability levels. Upstream failure is explicit.
+ * Base URLs come from extra.variables (WKND_EDS_BASE,
  * WKND_CATALOG_BASE) with production defaults baked into the lib.
  */

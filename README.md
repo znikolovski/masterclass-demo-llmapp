@@ -224,6 +224,42 @@ Without those flags, `extra.variables` is `undefined` and `greet` falls back to 
 
 ## Adobe Analytics for MCP actions
 
+### WKND discovery: catalog browsing and filters
+
+`discover_adventures` accepts an empty argument object to list the complete published
+catalog. All filters are optional and combine: `{ "region": "Europe" }`,
+`{ "experience_level": "beginner" }`, or
+`{ "region": "Europe", "experience_level": "beginner" }` require no activity.
+`{ "category": "trekking" }` filters authored categories; `activity` supports
+specific activities such as hiking, surfing, kayaking, and cycling. `all`/`any`
+mean no filter. Experience level is a suitability filter, not merely a ranking
+hint: unknown or nonmatching levels are excluded. Pace, priority, and landscape
+still rank matching adventures.
+
+Discovery reads published page metadata when the query index omits it, with EDS
+categories taking precedence over coarse commerce categories. Explicit European
+locations (including the Alps, Balkans, and UK) match Europe; incidental references
+in descriptions do not establish location or suitability. Unpublished fallback
+records are not added to a successfully loaded live catalog. Discovery reports an
+upstream error if both catalog sources fail, rather than presenting demo data as
+a live catalog. Demo defaults never establish beginner suitability.
+Text output includes every result, and the EDS widget renders the entire returned
+list. `structuredContent.ranked` is false for browsing and true for preference ranking.
+
+**Required Adobe LLM Apps UI update (metadata is not managed in this repo):**
+remove `activity` and `experience_level` from the discovery action's required input
+fields; make `category`, `activity`, `region`, `experience_level`, `landscape`,
+`pace`, `priority`, `trip_length_days`, and `intent` optional. Add the `category`
+string property with canonical values `trekking`, `water`, `climbing`, `cycling`,
+`desert`, `winter-alpine`, `photography`, and `general-outdoor`. Keep it optional
+so `{}` means all categories. The description should instruct the model to omit
+unspecified filters, use region/level alone or together, and use `category` for
+category listings rather than inventing personalization preferences. Preserve
+existing output fields and allow `category` and `editorial_url` on adventure
+items and `ranked` on the structured result. Download the updated `actions.json`
+for local MCP validation, deploy the handler, and refresh the host's tool discovery
+so it no longer caches the old required-input schema.
+
 The six WKND adventure actions are wrapped by `actions/lib/analytics.js`. Each invocation sends one server-side event to Adobe Edge Network using the WKND datastream. It includes a virtual page view (`mcp:<action-name>`) so Adobe Analytics counts the action, and records status, duration, input/output byte sizes, and selected host context. Tool arguments and outputs are not serialized into the event; only their byte sizes are sent, except optional `userIntent`, which is capped at 255 UTF-8 bytes.
 
 The event sends XDM under the datastream's custom tenant namespace (with the required leading `_`) and Analytics variables under `event.data.__adobe.analytics` for direct eVar/event mapping. The POC falls back to the non-secret datastream ID, IMS organization ID, and XDM tenant in `actions/lib/analytics.js` because the LLM Apps UI does not currently expose these variables; `WKND_ANALYTICS_DATASTREAM_ID`, `WKND_ANALYTICS_ORG_ID`, and `WKND_ANALYTICS_XDM_TENANT` override them when available.
