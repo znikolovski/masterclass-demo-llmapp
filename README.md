@@ -287,6 +287,40 @@ Metadata remains UI-owned: **do not edit `actions.json`**. Before deployment:
    links, and resizing. It never fetches private bookings directly; all booking
    calls use the host bridge and the tool's authorization.
 
+### Temporary reconnect diagnostic
+
+`actions/check-booking-auth/index.js` is a tool-only diagnostic for the current
+reconnect investigation. In LLM Apps, register **`check-booking-auth`** with
+authentication **not required**, no required scopes, no widget, and model
+visibility. Use this explicit empty input schema so the SDK passes both tool
+arguments and request context:
+
+```json
+{ "type": "object", "properties": {}, "additionalProperties": false }
+```
+
+Keep application authentication enabled and keep **`check-booking`** protected
+with `bookings:read`. Deploy the latest repository code and refreshed UI metadata,
+then ask ChatGPT to run `check-booking-auth` and display its status flags. The
+diagnostic returns the same flags in text and structured content, never tokens,
+claim values, user identifiers, request headers, secrets, or bookings. Its handler
+does not log, fetch, or change data.
+
+`runtime_verified` reports whether the Runtime supplied verified auth context.
+The other JWT claim checks are **unverified diagnostics**, not authorization:
+
+| Result | Meaning |
+| --- | --- |
+| `bearer_token_present: false` | No bearer token is visible in the request context. |
+| `bearer_token_present: null` | Headers and a verified token are unavailable; token presence is unknown. |
+| `runtime_verified: true`, `runtime_has_booking_scope: false` | Token verification passed but `bookings:read` was not granted. |
+| `runtime_verified: false`, `audience_matches: false` | Visible JWT claims target a different audience; check Auth0's MCP API identifier and requested resource. |
+| `token_expired: true` | The visible JWT expiration has passed. |
+| `runtime_verified: false`, compatible claim checks | Claims alone cannot establish validity; investigate signature/key validation and the issued token. |
+
+Remove the diagnostic from the UI and repository after the investigation. It
+does not replace booking authentication or resolve signing-key provisioning.
+
 ### Worker deployment prerequisite and trust boundary
 
 The handler only makes HTTPS, nonredirecting, eight-second-timeout, `no-store`
