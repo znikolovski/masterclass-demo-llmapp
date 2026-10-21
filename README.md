@@ -224,6 +224,17 @@ Without those flags, `extra.variables` is `undefined` and `greet` falls back to 
 
 ## Authenticated WKND booking lookup
 
+The upstream boilerplate is
+[`adobe-rnd/llm-apps-boilerplate`](https://github.com/adobe-rnd/llm-apps-boilerplate).
+The integration through `b164c16d4afcab24f80453e6a061f177e8a7cd7c` uses
+`@adobe/llm-apps-runtime` 1.2.0 from the upstream lockfile, while retaining
+WKND handlers, analytics, tests, and EDS widget configuration.
+After pulling this update, redeploy through LLM Apps so it rebuilds the action
+with the new runtime and UI-owned metadata. Installing dependencies locally does
+not update the deployed MCP server. Reconnect and verify the booking tool in the
+real host after deployment; a successful local build does not establish that an
+OAuth reconnect loop is resolved.
+
 `actions/check-booking/index.js` implements the deployed **`check-booking`**
 tool (hyphenated, not `check_booking`). Existing public tools are unchanged.
 The handler and the website's `check-booking` EDS block support:
