@@ -222,6 +222,110 @@ node server/local.js \
 
 Without those flags, `extra.variables` is `undefined` and `greet` falls back to its default greeting — degrade gracefully, same as `authInfo`.
 
+## Authenticated WKND booking lookup
+
+`actions/check-booking/index.js` implements the deployed **`check-booking`**
+tool (hyphenated, not `check_booking`). Existing public tools are unchanged.
+The handler and its self-contained `widget.html` support:
+
+- `{ "booking_id": "BK_0123456789abcdef" }`: details of a booking owned by the
+  signed-in caller.
+- `{}`: the caller's booking summaries; `{ "cursor": "<nextCursor>" }`: the next
+  page. **Listing cannot be invoked through the deployed schema until the UI
+  makes `booking_id` optional and adds optional string `cursor`.** The current
+  required-string `booking_id` schema remains compatible with detail lookup.
+
+There are no owner, email, subject, or account arguments. Identity comes only
+from verified `extra.authInfo.extra.sub`; ownership is enforced by the Worker,
+not by filtering an unprotected list in this app. The handler explicitly refuses
+missing identity, expired/mismatched resource context, or missing `bookings:read`,
+even if UI authorization was accidentally disabled. Do not expose a raw Runtime
+action that lets untrusted callers supply `extra.authInfo`.
+
+### Required Adobe LLM Apps UI settings
+
+Metadata remains UI-owned: **do not edit `actions.json`**. Before deployment:
+
+1. Enable application authentication with issuer
+   `https://dev-g4kzp3zwgwzs8oha.us.auth0.com/`, its Auth0 JWKS endpoint
+   `https://dev-g4kzp3zwgwzs8oha.us.auth0.com/.well-known/jwks.json`, resource
+   `https://28538-wkndsherpa.adobeio-static.net/api/v1/web/llm-apps/mcp`,
+   and supported scope `bookings:read`. Auth0 must issue tokens for this resource
+   and grant that scope.
+2. On **`check-booking`**, set `requiresAuth: true`, required scope
+   `bookings:read`, and enable its custom HTML widget. Allow the action to be
+   called by the widget as well as the model for details, paging, and refresh.
+   Keep `booking_id` a string; make it optional and add optional string `cursor`
+   when enabling list mode. Never add owner inputs.
+3. Declare these app variables, which the runtime passes in `extra.variables`:
+
+   | Variable | UI type | Value |
+   | --- | --- | --- |
+   | `WKND_BOOKING_API_BASE` | `string` | Optional HTTPS **origin**; defaults to `https://wknd-aero-api.jaggah.workers.dev`. No path, query, credentials, or fragment. |
+   | `WKND_BOOKING_ASSERTION_SECRET` | `secret` | Required shared UTF-8 signing key, at least **32 bytes**, provisioned out of band and identical to the Worker's secret. Never commit or print it. |
+
+4. Download fresh `actions.json` from the UI if local protocol testing is needed.
+   Deployment regenerates metadata. A committed `widget.html` takes priority
+   over any previously configured EDS widget. The widget has no external
+   resources and never fetches private bookings directly; all calls use the host
+   bridge and the tool's authorization.
+
+### Worker deployment prerequisite and trust boundary
+
+The handler only makes HTTPS, nonredirecting, eight-second-timeout, `no-store`
+GET requests to `/api/bookings` or `/api/bookings/<booking_id>`. It sends
+`X-WKND-Delegation: mcp` and `Authorization: Bearer <HS256 assertion>` — **never**
+the caller's MCP access token, whose audience is not the Worker. The assertion
+uses `alg: HS256`, `typ: JWT`, the MCP resource as `iss`, the configured Worker
+origin as `aud`, the verified subject as `sub`, the Auth0 issuer as
+`identity_issuer`, `scope: "bookings:read"`, current `iat`, a fresh UUID `jti`,
+and `exp` at most 60 seconds later and no later than the caller's expiry.
+
+**This companion change alone does not establish backend owner mapping.** The
+parent Worker/checkout implementation must be deployed before end-to-end
+authenticated lookup works. It must independently verify the delegation marker,
+signature, issuer, audience, identity issuer, scope, and lifetime, accept
+delegation only for read-only GET operations, and map ownership using the same
+Auth0 issuer + subject stored by authenticated checkout. Old anonymous demo
+bookings must not become claimable by ID or email. Worker and app secrets must
+match; there is no unsigned or mock fallback.
+
+Upstream 401/403/404 are explicit tool errors with safe messages; service,
+transport, malformed-response, and timeout errors remain errors, not successful
+empty lists. Upstream bodies and credentials are never echoed on errors.
+Successful responses project only the documented booking/flight/adventure/
+preparation fields: no tokens, contact details, or owner identifiers in either
+text or widget data. No private response caching or widget storage is used.
+
+The widget supports list/detail navigation, keyboard forms, narrow screens,
+loading/error/empty states, and a demo badge. Scheduled instants use their
+published time zones; absent instants never acquire an invented date. Empty or
+missing preparation arrays are explicitly **unavailable / not confirmed**,
+not “no permit needed.” Nonempty preparation is published guidance, not proof
+of approval. The app does no enrichment or mock-derived guidance; the Worker
+must populate preparation only from real published attributes when available.
+
+Focused local validation (mocked verified auth and Worker responses, no live
+credentials):
+
+```bash
+npx eslint actions/check-booking/index.js test/actions/check-booking*.test.js
+npx jest test/actions/check-booking --runInBand
+node .claude/skills/llm-apps-action-author/scripts/validate-handler.js actions/check-booking/index.js
+npm run build
+```
+
+The existing `test/server.test.js` replaces and removes local `actions.json`.
+Preserve any UI-downloaded copy before running the full `npm test` suite and
+download it again before metadata-dependent smoke tests or builds. Without a
+download, `prebuild` creates only an empty local placeholder.
+
+Real signed-in host testing still requires the UI changes, a working Auth0
+consent flow, the shared secret, and the deployed owner-aware Worker. In
+particular, test account A versus account B, deny account B access to A's booking,
+confirm paging and logout behavior, and verify the host does not reuse another
+account's private widget result.
+
 ## Adobe Analytics for MCP actions
 
 ### WKND discovery: catalog browsing and filters

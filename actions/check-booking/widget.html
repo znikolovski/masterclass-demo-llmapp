@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Your WKND bookings</title>
+    <style>
+      :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 16px; color: #18212b; background: #fff; }
+      h1 { font-size: 1.4rem; margin: 0 0 12px; }
+      h2 { font-size: 1.15rem; }
+      h3 { font-size: 1rem; }
+      p { margin: 8px 0; }
+      button, input { font: inherit; min-height: 44px; border: 1px solid #657080; border-radius: 6px; padding: 8px 12px; }
+      button { background: #18212b; color: #fff; cursor: pointer; }
+      button:disabled { opacity: .6; cursor: wait; }
+      button:focus-visible, input:focus-visible, a:focus-visible { outline: 3px solid #005fcc; outline-offset: 3px; }
+      form, nav { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+      label { display: block; font-weight: 600; }
+      input { width: 100%; min-width: 0; background: #fff; color: #18212b; }
+      .lookup { flex: 1 1 230px; }
+      form button { align-self: flex-end; }
+      article { border: 1px solid #c8cdd3; border-radius: 10px; padding: 16px; margin: 12px 0; overflow-wrap: anywhere; }
+      .badge { display: inline-block; background: #ffdf73; color: #302400; border-radius: 4px; padding: 2px 8px; font-weight: 700; }
+      .muted { color: #525d69; }
+      .error { color: #a01717; }
+      a { color: #0057ad; }
+      dl { display: grid; grid-template-columns: minmax(90px, 1fr) 2fr; gap: 6px 12px; }
+      dt { font-weight: 600; }
+      dd { margin: 0; overflow-wrap: anywhere; }
+      ul { padding-left: 22px; }
+      @media (prefers-color-scheme: dark) {
+        body { background: #161c22; color: #f3f5f7; }
+        input { background: #222b35; color: #f3f5f7; }
+        button { background: #e7edf5; color: #18212b; }
+        .muted { color: #c1cbd5; }
+        .error { color: #ffb0b0; }
+        a { color: #94caff; }
+      }
+    </style>
+  </head>
+  <body>
+    <main aria-labelledby="title">
+      <h1 id="title">Your WKND bookings</h1>
+      <form id="lookup">
+        <div class="lookup">
+          <label for="booking-id">Booking ID</label>
+          <input id="booking-id" name="booking_id" placeholder="BK_0123456789abcdef" pattern="BK_[0-9a-f]{16}" maxlength="19" required autocomplete="off" spellcheck="false">
+        </div>
+        <button type="submit">View booking</button>
+      </form>
+      <nav aria-label="Booking actions"><button type="button" id="list">My bookings</button></nav>
+      <p id="status" role="status" aria-live="polite">Loading booking information…</p>
+      <div id="results" aria-busy="true"></div>
+    </main>
+    <script>
+      (() => {
+        const results = document.getElementById('results');
+        const status = document.getElementById('status');
+        const input = document.getElementById('booking-id');
+        const pending = new Map();
+        let requestId = 0;
+        let origin = '*';
+        let bridgeReady = false;
+        let busy = true;
+
+        function node(tag, value, className) {
+          const element = document.createElement(tag);
+          if (value !== undefined) element.textContent = String(value);
+          if (className) element.className = className;
+          return element;
+        }
+        function setBusy(value) {
+          busy = value;
+          results.setAttribute('aria-busy', String(value));
+          document.querySelectorAll('button').forEach((button) => { button.disabled = value; });
+        }
+        function error(message) {
+          results.replaceChildren();
+          status.className = 'error';
+          status.textContent = message;
+          setBusy(false);
+        }
+        function send(method, params) {
+          if (window.parent === window) return Promise.reject(new Error('Open this widget in an MCP Apps host.'));
+          return new Promise((resolve, reject) => {
+            const id = ++requestId;
+            const timer = setTimeout(() => {
+              pending.delete(id);
+              reject(new Error('The host did not respond. Please try again.'));
+            }, 15000);
+            pending.set(id, { resolve, reject, timer });
+            window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, origin);
+          });
+        }
+        function safeLink(container, label, value) {
+          try {
+            const url = new URL(value);
+            if (url.protocol !== 'https:' || url.username || url.password) return;
+            const link = node('a', label);
+            link.href = url.href;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            container.append(link);
+          } catch { /* An absent source must not become a fabricated link. */ }
+        }
+        function scheduled(instant, zone) {
+          if (typeof instant !== 'string' || !/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(instant)) {
+            return 'Scheduled date and time unavailable';
+          }
+          const date = new Date(instant);
+          if (!Number.isFinite(date.getTime())) return 'Scheduled date and time unavailable';
+          if (typeof zone !== 'string' || !zone.trim()) return `${date.toISOString()} (UTC; local time zone unavailable)`;
+          try {
+            return `${new Intl.DateTimeFormat(undefined, {
+              timeZone: zone, dateStyle: 'medium', timeStyle: 'short'
+            }).format(date)} (${zone})`;
+          } catch {
+            return `${date.toISOString()} (UTC; local time zone unavailable)`;
+          }
+        }
+        function row(list, label, value) {
+          list.append(node('dt', label), node('dd', value === null || value === undefined || value === '' ? 'Unavailable' : value));
+        }
+        function preparation(article, data) {
+          article.append(node('h3', 'Adventure preparation'));
+          article.append(node('p', 'Published guidance is not confirmation of a reservation, permit approval, or current access conditions.', 'muted'));
+          const labels = [['itinerary', 'Itinerary'], ['packingList', 'Packing list'], ['permits', 'Permits and access']];
+          labels.forEach(([key, title]) => {
+            article.append(node('h3', title));
+            const items = Array.isArray(data?.[key]) ? data[key].filter((item) => typeof item === 'string' && item.trim()) : [];
+            if (!items.length) {
+              article.append(node('p', 'Unavailable — requirements have not been confirmed. Check the published adventure source or contact the operator.', 'muted'));
+            } else {
+              const list = node('ul');
+              items.forEach((item) => list.append(node('li', item)));
+              article.append(list);
+            }
+          });
+          safeLink(article, 'Published preparation source', data?.sourceUrl);
+        }
+        function bookingCard(booking, details) {
+          const article = node('article');
+          article.append(node('h2', booking.id));
+          if (booking.demo === true) article.append(node('span', 'Demo booking — not a ticket', 'badge'));
+          if (booking.demo === null) article.append(node('p', 'Demo / ticket status unavailable', 'muted'));
+          const list = node('dl');
+          const flight = booking.flight || {};
+          row(list, 'Status', booking.status);
+          row(list, 'Route', flight.origin && flight.destination ? `${flight.origin} → ${flight.destination}` : null);
+          row(list, 'Departs', scheduled(flight.departureAt, flight.originTimeZone));
+          row(list, 'Arrives', scheduled(flight.arrivalAt, flight.destinationTimeZone));
+          if (!flight.departureAt && flight.departTime) row(list, 'Published departure time (no date)', flight.departTime);
+          row(list, 'Cabin', flight.cabin);
+          if (details) {
+            row(list, 'Aircraft', flight.aircraft);
+            row(list, 'Duration', flight.duration);
+            row(list, 'Seats', Array.isArray(booking.seats) && booking.seats.length ? booking.seats.join(', ') : null);
+            row(list, 'Passengers', booking.passengerCount);
+            row(list, 'Total', booking.total !== null && booking.total !== undefined && booking.currency ? `${booking.total} ${booking.currency}` : null);
+          }
+          article.append(list);
+          if (booking.adventure) {
+            article.append(node('h3', booking.adventure.title || 'Adventure'));
+            safeLink(article, 'Read the published adventure', booking.adventure.editorialUrl);
+          }
+          if (details) preparation(article, booking.preparation);
+          else {
+            const button = node('button', 'View details');
+            button.type = 'button';
+            button.setAttribute('aria-label', `View details for ${booking.id}`);
+            button.addEventListener('click', () => call({ booking_id: booking.id }));
+            article.append(button);
+          }
+          return article;
+        }
+        function render(output) {
+          const data = output?.structuredContent || output;
+          if (output?.isError || data?.error) {
+            error(data?.error?.message || 'Booking information is unavailable. Sign in and try again.');
+            return;
+          }
+          results.replaceChildren();
+          status.className = '';
+          if (data?.mode === 'details' && data.booking) {
+            input.value = data.booking.id;
+            results.append(bookingCard(data.booking, true));
+            status.textContent = 'Booking details loaded.';
+          } else if (data?.mode === 'list' && Array.isArray(data.bookings)) {
+            data.bookings.forEach((booking) => results.append(bookingCard(booking, false)));
+            status.textContent = data.bookings.length ? `${data.bookings.length} bookings on this page.` : 'No bookings found for your account.';
+            if (data.nextCursor) {
+              const next = node('button', 'Next page');
+              next.type = 'button';
+              next.addEventListener('click', () => call({ cursor: data.nextCursor }));
+              results.append(next);
+            }
+          } else {
+            error('No booking information was returned. Please try again.');
+            return;
+          }
+          setBusy(false);
+        }
+        async function call(args) {
+          if (busy) return;
+          results.replaceChildren();
+          setBusy(true);
+          status.className = '';
+          status.textContent = 'Loading booking information…';
+          try {
+            let output;
+            if (window.openai?.callTool) output = await window.openai.callTool('check-booking', args);
+            else if (bridgeReady) output = await send('tools/call', { name: 'check-booking', arguments: args });
+            else throw new Error('An MCP Apps host is required to load bookings.');
+            render(output);
+          } catch {
+            error('Unable to load bookings. Sign in, check that the tool is enabled, and try again.');
+          }
+        }
+        document.getElementById('lookup').addEventListener('submit', (event) => {
+          event.preventDefault();
+          if (document.getElementById('lookup').reportValidity()) call({ booking_id: input.value.trim() });
+        });
+        document.getElementById('list').addEventListener('click', () => call({}));
+        window.addEventListener('message', (event) => {
+          if (event.source !== window.parent || (origin !== '*' && event.origin !== origin)) return;
+          const message = event.data;
+          if (!message || message.jsonrpc !== '2.0') return;
+          if (pending.has(message.id)) {
+            const request = pending.get(message.id);
+            pending.delete(message.id);
+            clearTimeout(request.timer);
+            origin = event.origin;
+            if (message.error) request.reject(new Error('The host rejected this request.'));
+            else request.resolve(message.result);
+          } else if (message.method === 'ui/notifications/tool-result') render(message.params);
+          else if (message.method === 'ui/notifications/tool-input') {
+            results.replaceChildren();
+            status.className = '';
+            status.textContent = 'Loading booking information…';
+            setBusy(true);
+          } else if (message.method === 'ui/notifications/tool-cancelled') error('Booking lookup cancelled.');
+        });
+        window.addEventListener('openai:set_globals', (event) => {
+          if (event.detail?.globals?.toolOutput) render(event.detail.globals.toolOutput);
+        });
+        setBusy(true);
+        (async () => {
+          try {
+            if (window.openai?.toolOutput !== undefined) {
+              render(await window.openai.toolOutput);
+            } else {
+              await send('ui/initialize', {
+                appInfo: { name: 'wknd-check-booking', version: '1.0.0' },
+                appCapabilities: {},
+                protocolVersion: '2026-01-26'
+              });
+              bridgeReady = true;
+              window.parent.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} }, origin);
+            }
+          } catch {
+            error('Booking information is unavailable. Open this tool in an MCP Apps host and sign in.');
+          }
+        })();
+      })();
+    </script>
+  </body>
+</html>
