@@ -226,7 +226,7 @@ Without those flags, `extra.variables` is `undefined` and `greet` falls back to 
 
 `actions/check-booking/index.js` implements the deployed **`check-booking`**
 tool (hyphenated, not `check_booking`). Existing public tools are unchanged.
-The handler and its self-contained `widget.html` support:
+The handler and the website's `check-booking` EDS block support:
 
 - `{ "booking_id": "BK_0123456789abcdef" }`: details of a booking owned by the
   signed-in caller.
@@ -253,7 +253,13 @@ Metadata remains UI-owned: **do not edit `actions.json`**. Before deployment:
    and supported scope `bookings:read`. Auth0 must issue tokens for this resource
    and grant that scope.
 2. On **`check-booking`**, set `requiresAuth: true`, required scope
-   `bookings:read`, and enable its custom HTML widget. Allow the action to be
+   `bookings:read`, and select an **EDS widget** with:
+   - Script URL: `https://main--masterclass-demo--znikolovski.aem.page/scripts/aem-embed.js`
+   - Widget URL: `https://main--masterclass-demo--znikolovski.aem.page/eds-widgets/check-booking`
+
+   The page contains the `check-booking` EDS block and uses the shared LLM Apps
+   SDK. Do not add a local `actions/check-booking/widget.html`: it would override
+   the EDS configuration. Allow the action to be
    called by the widget as well as the model for details, paging, and refresh.
    Keep `booking_id` a string; make it optional and add optional string `cursor`
    when enabling list mode. Never add owner inputs.
@@ -262,13 +268,13 @@ Metadata remains UI-owned: **do not edit `actions.json`**. Before deployment:
    | Variable | UI type | Value |
    | --- | --- | --- |
    | `WKND_BOOKING_API_BASE` | `string` | Optional HTTPS **origin**; defaults to `https://wknd-aero-api.jaggah.workers.dev`. No path, query, credentials, or fragment. |
-   | `WKND_BOOKING_ASSERTION_SECRET` | `secret` | Required shared UTF-8 signing key, at least **32 bytes**, provisioned out of band and identical to the Worker's secret. Never commit or print it. |
+   | `WKND_BOOKING_ASSERTION_SECRET` | Server-side secret | Required shared UTF-8 signing key, at least **32 bytes**, provisioned out of band and identical to the Worker's secret. The current UI does not support secrets; do not save it as an ordinary Variable. Secure runtime provisioning remains required. Never commit or print it. |
 
 4. Download fresh `actions.json` from the UI if local protocol testing is needed.
-   Deployment regenerates metadata. A committed `widget.html` takes priority
-   over any previously configured EDS widget. The widget has no external
-   resources and never fetches private bookings directly; all calls use the host
-   bridge and the tool's authorization.
+   Deployment regenerates metadata and builds the EDS wrapper from these URLs.
+   The EDS block uses the shared SDK for initial results, updates, tool calls,
+   links, and resizing. It never fetches private bookings directly; all booking
+   calls use the host bridge and the tool's authorization.
 
 ### Worker deployment prerequisite and trust boundary
 
@@ -297,11 +303,12 @@ Successful responses project only the documented booking/flight/adventure/
 preparation fields: no tokens, contact details, or owner identifiers in either
 text or widget data. No private response caching or widget storage is used.
 
-The widget supports list/detail navigation, keyboard forms, narrow screens,
+The EDS widget supports list/detail navigation, keyboard forms, narrow screens,
 loading/error/empty states, and a demo badge. Scheduled instants use their
 published time zones; absent instants never acquire an invented date. Empty or
 missing preparation arrays are explicitly **unavailable / not confirmed**,
-not “no permit needed.” Nonempty preparation is published guidance, not proof
+not “no permit needed.” Standalone/preview pages never display sample private
+bookings. Nonempty preparation is published guidance, not proof
 of approval. The app does no enrichment or mock-derived guidance; the Worker
 must populate preparation only from real published attributes when available.
 
@@ -314,6 +321,9 @@ npx jest test/actions/check-booking --runInBand
 node .claude/skills/llm-apps-action-author/scripts/validate-handler.js actions/check-booking/index.js
 npm run build
 ```
+
+EDS widget browser coverage lives in the website repository:
+`node tools/scripts/test-check-booking-widget.mjs`.
 
 The existing `test/server.test.js` replaces and removes local `actions.json`.
 Preserve any UI-downloaded copy before running the full `npm test` suite and
