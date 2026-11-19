@@ -20,8 +20,8 @@ const DELEGATION_AUDIENCE = 'urn:wknd-commerce:storefront';
 const DEFAULT_GRAPHQL_URL = 'https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce/storefront-graphql';
 const DM_ASSET_PREFIX = /^https:\/\/delivery-p\d+-e\d+\.adobeaemcloud\.com\/adobe\/assets\/urn:aaid:aem:[0-9a-f-]+$/i;
 const SITE_HOST = 'wknd-adventures.run.place';
-// A cold Commerce container (IMS token + DB connect) has measured ~22 s; the backend's own limit is
-// 30 s and a keep-warm alarm normally avoids cold starts. A write that times out but commits is
+// A cold Commerce container loads its catalog snapshot first: ~13 s measured from a distant Runtime
+// region (~2–3 s nearby); the backend's own limit is 30 s. A write that times out but commits is
 // still safe — a retry with the old cart_version is rejected as cart_changed.
 const FETCH_TIMEOUT_MS = 28000;
 const PAYMENT_METHOD = 'wknd_demo_pay';
@@ -147,11 +147,7 @@ function assertion(shopper, extra, orderExpect) {
  */
 async function graphql(extra, query, variables = {}, { shopper, orderExpect, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
   const url = graphqlUrl(extra);
-  // Runtime freezes idle containers; a pooled keep-alive socket is then silently dropped upstream
-  // (NAT idle timeout) and the next request hangs until the abort. One fresh connection per call.
-  const headers = {
-    'Content-Type': 'application/json', Accept: 'application/json', 'Cache-Control': 'no-store', Connection: 'close',
-  };
+  const headers = { 'Content-Type': 'application/json', Accept: 'application/json', 'Cache-Control': 'no-store' };
   if (shopper) {
     headers.Authorization = `Bearer ${assertion(shopper, extra, orderExpect)}`;
     headers['X-WKND-Delegation'] = 'mcp';
