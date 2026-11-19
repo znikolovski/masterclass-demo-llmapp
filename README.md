@@ -226,9 +226,11 @@ Without those flags, `extra.variables` is `undefined` and `greet` falls back to 
 
 The upstream boilerplate is
 [`adobe-rnd/llm-apps-boilerplate`](https://github.com/adobe-rnd/llm-apps-boilerplate).
-The integration through `b164c16d4afcab24f80453e6a061f177e8a7cd7c` uses
+The integration through `b164c16d4afcab24f80453e6a061f177e8a7cd7c` used
 `@adobe/llm-apps-runtime` 1.2.0 from the upstream lockfile, while retaining
-WKND handlers, analytics, tests, and EDS widget configuration.
+WKND handlers, analytics, tests, and EDS widget configuration. The app now depends
+on runtime `^1.7.0` (required by the LLM Apps UI for user-intent platform filtering;
+1.5.0+ adds Gemini widget support); upstream's example actions were not merged.
 After pulling this update, redeploy through LLM Apps so it rebuilds the action
 with the new runtime and UI-owned metadata. Installing dependencies locally does
 not update the deployed MCP server. Reconnect and verify the booking tool in the
@@ -380,6 +382,115 @@ consent flow, the shared secret, and the deployed owner-aware Worker. In
 particular, test account A versus account B, deny account B access to A's booking,
 confirm paging and logout behavior, and verify the host does not reuse another
 account's private widget result.
+
+## WKND shop in ChatGPT: shared cart and Demo Pay checkout
+
+Seven tools bring the WKND Adventures shop (`/shop` on the website, backed by the mock Adobe
+Commerce service in the sibling `wknd-commerce` App Builder repo) into the conversation. A signed-in
+shopper gets **the same cart** in ChatGPT and on the website, and can check out in chat with
+**WKND Demo Pay** — demonstration only: no payment details are collected, nothing is charged, nothing
+ships.
+
+| Tool (UI name) | Auth | Annotations | Dedicated EDS widget | Purpose |
+| --- | --- | --- | --- | --- |
+| `search-shop-products` | none | read-only | `/eds-widgets/search-shop-products-demo` | Live catalog search with category/activity/price/stock filters |
+| `get-shop-product` | none | read-only | `/eds-widgets/get-shop-product-demo` | One product: options with live stock; exact variant when `options` are given (preselected in the widget) |
+| `get-shop-cart` | `shop:cart` | read-only | `/eds-widgets/get-shop-cart-demo` | The shopper's active cart |
+| `add-shop-cart-items` | `shop:cart` | write | none (tool-only) | Add explicitly chosen SKUs/variants; called by the widgets or the model |
+| `update-shop-cart-items` | `shop:cart` | write, idempotent | none (tool-only) | Absolute quantities per line (`0` removes); called by the cart widget or the model |
+| `prepare-shop-checkout` | `shop:cart` | write | `/eds-widgets/prepare-shop-checkout-demo` | Email, new or saved address, delivery method, coupon, Demo Pay. Never orders |
+| `place-shop-demo-order` | `shop:cart` | write, destructive | none (tool-only) | Places the **reviewed** cart (version + total must match); called by the checkout widget |
+
+Handlers live in `actions/<tool>/index.js`; Commerce access, the delegated assertion and normalisation
+live in `actions/lib/commerce.js`. Every tool with a UI has its **own EDS block** in the website repo,
+named after the tool (`blocks/<tool>/`), with its own widget page `/eds-widgets/<tool>-demo`. Shared
+rendering lives in `scripts/llmapp-shop.js` and `styles/llmapp-shop.css`. Widgets hand off between
+steps through the conversation (for example, the cart's "Check out" asks the assistant to run
+`prepare-shop-checkout`, which opens the checkout widget). Do not add `widget.html` to these action
+directories: it would override the EDS widget.
+
+**Gear checklist → shop.** `build-gear-checklist` matches checklist items to in-stock WKND products in
+one batched lookup (`shop_matches`, `shop_status` in its result; curated rules in
+`SHOP_RULES`). The match is best effort (6-second timeout): if the shop is unavailable the checklist
+is returned unchanged with `shop_status: "unavailable"`. Its widget shows the matched product under
+each item, with **Add to cart** for simple products (via `add-shop-cart-items`) and **Choose options**
+for products with sizes or colours (a follow-up that opens the `get-shop-product` widget). Gear the
+shop does not sell (tents, stoves, maps) stays a plain checklist item.
+
+### How the shared cart works
+
+- Commerce stays the source of truth: this app keeps no cart state and has no mock fallback.
+- Catalog reads are anonymous. Cart and checkout calls carry a 60-second HS256 **delegated shopper
+  assertion** (`X-WKND-Delegation: mcp`, `iss` = MCP resource, `aud` = `urn:wknd-commerce:storefront`,
+  verified Auth0 `sub`, `scope: shop:cart`, single-use `jti`), signed with
+  `WKND_COMMERCE_ASSERTION_SECRET`. The MCP access token is never forwarded.
+- `storefront-graphql` verifies the assertion and resolves the customer by Auth0 `sub` — the same
+  customer, and therefore the same `customerCart`, the website's Auth0 sign-in resolves. A first
+  sign-in in ChatGPT creates the customer; the website fills in the profile on its next sign-in.
+  Guest carts merge into it when the shopper signs in on the website (drop-in behaviour).
+- Every cart result carries a `version` (a hash of lines, totals, contact, address, delivery and
+  payment). Writes may pass `cart_version`; if the cart changed elsewhere (website tab, another chat,
+  a retry) the call fails with `cart_changed` and returns the current cart instead of applying a
+  stale or duplicate change. `place-shop-demo-order` **requires** `cart_version`,
+  `expected_grand_total` and `confirm: true`. Its assertion also signs the reviewed lines and total
+  (`order_expect`), which the backend checks against the exact cart revision it claims, so a cart
+  edited between review and placement is never ordered and one cart produces at most one order.
+- The website refreshes a signed-in shopper's cart when its tab regains focus, so changes made in
+  ChatGPT (or an order placed there) appear without a reload.
+
+### Required Adobe LLM Apps UI settings
+
+1. **App auth:** add `shop:cart` to the supported scopes (next to `bookings:read`). In Auth0, define
+   `shop:cart` on the API whose identifier is the MCP resource and allow the ChatGPT client to request
+   it.
+2. **Variables:**
+
+   | Variable | UI type | Value |
+   | --- | --- | --- |
+   | `WKND_COMMERCE_GRAPHQL_URL` | `string` | Optional HTTPS URL of the `storefront-graphql` web action. Defaults to production `https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce/storefront-graphql`. |
+   | `WKND_COMMERCE_ASSERTION_SECRET` | Server-side secret | Required for cart tools: ≥ 32 bytes, identical to `wknd-commerce`'s `WKND_MCP_DELEGATION_SECRET`. Same provisioning caveat as `WKND_BOOKING_ASSERTION_SECRET`: never commit, print or store it as an ordinary variable. |
+
+3. **Per tool:** if the UI offers per-action auth, set `requiresAuth: true` with required scope
+   `shop:cart` on the five cart tools. If auth can only be set app-wide (current UI), leave the
+   cart tools without it: their handlers verify the WKND sign-in and `shop:cart` themselves and,
+   when missing, return the same `_meta["mcp/www_authenticate"]` challenge the runtime gate
+   would, so ChatGPT still prompts the shopper to sign in. `search-shop-products` and
+   `get-shop-product` work without sign-in.
+   Give each tool with a UI its own **EDS widget**: script URL
+   `https://main--masterclass-demo--znikolovski.aem.page/scripts/aem-embed.js` (the shared EDS
+   embed loader the runtime requires) and widget URL
+   `https://main--masterclass-demo--znikolovski.aem.page/eds-widgets/<tool>-demo` — that is
+   `…/search-shop-products-demo`, `…/get-shop-product-demo`, `…/get-shop-cart-demo` and `…/prepare-shop-checkout-demo`.
+   `add-shop-cart-items`, `update-shop-cart-items` and `place-shop-demo-order` have no widget.
+   Allow `app` visibility on the add/update tools so the widgets can call them. Give
+   `place-shop-demo-order` **`app` visibility only**: the model then cannot place orders; the
+   shopper does, with the checkout widget's "Place demo order" button after reviewing the totals.
+4. **Widget CSP:** resource domains `https://delivery-p115476-e1135027.adobeaemcloud.com` (product
+   images), `https://main--masterclass-demo--znikolovski.aem.page`, `https://fonts.googleapis.com`
+   and `https://fonts.gstatic.com`. The widgets call tools through the host bridge only.
+5. **Input schemas** (all objects use `"additionalProperties": false`):
+
+   | Tool | Properties |
+   | --- | --- |
+   | `search-shop-products` | `query` string; `category` string (path such as `apparel/jackets`); `activity` string; `min_price`, `max_price` number (AUD incl. GST); `in_stock_only` boolean (default true); `limit` integer 1–12 |
+   | `get-shop-product` | `sku` string (required); `options` object of option → value, e.g. `{ "colour": "Deep Ocean", "size": "M" }` |
+   | `get-shop-cart` | none |
+   | `add-shop-cart-items` | `sku` string (required); `quantity` integer 1–20 (default 1); `options` object of option → value, e.g. `{ "colour": "Deep Ocean", "size": "M" }`; `cart_version` string. One product per call (the UI has no array type) |
+   | `update-shop-cart-items` | `line_id` string (required); `quantity` integer 0–20 (required; 0 removes the line); `cart_version` string. One line per call |
+   | `prepare-shop-checkout` | `cart_version`, `email`, `saved_address_id`, `shipping_method` (`standard`, `express`, `international`), `coupon_code` strings; `shipping_address` object `{ firstname, lastname, street (string or 1–2 strings), city, region, postcode, country_code, telephone }` |
+   | `place-shop-demo-order` | `cart_version` string, `expected_grand_total` number, `confirm` boolean — all required |
+
+Backend prerequisite: deploy `wknd-commerce` with `WKND_MCP_DELEGATION_ISSUER` (this MCP resource)
+and `WKND_MCP_DELEGATION_SECRET`. Without them every cart tool returns a sign-in error.
+
+### Checkout scope
+
+This is a private demo of in-chat checkout against a mock store. Production ChatGPT checkout is a
+separate, gated workstream: OpenAI's plugin guidelines require external merchant checkout today, and
+native (Instant) Checkout is limited to approved partners using the Agentic Commerce checkout and
+delegated-payment specs. Do not reuse this flow for real payments.
+
+Tests: `npx jest test/lib/commerce.test.js test/actions/*shop* test/actions/build-gear-checklist.test.js`.
 
 ## Adobe Analytics for MCP actions
 

@@ -3,6 +3,71 @@
 // is the offline fallback. See the note below the handler.
 const { loadAdventures, findAdventure } = require('../lib/wknd.js');
 const { withAnalytics } = require('../lib/analytics.js');
+const { bestMatches, formatMoney } = require('../lib/commerce.js');
+
+// Checklist item → WKND shop search phrase. Gear the shop does not sell (tents, stoves, maps)
+// has no rule and stays a plain checklist item.
+const SHOP_RULES = [
+    [/backpack/, (item) => (/65/.test(item) ? 'expedition 65 backpack' : 'trek 45 backpack')],
+    [/trekking poles/, () => 'carbon trekking poles'],
+    [/headlamp/, () => 'alpine start headlamp'],
+    [/sunglasses|sun protection/, () => 'polarised trail sunglasses'],
+    [/base layer/, (_item, ctx) => (ctx.cold ? 'merino 250 zip neck' : 'merino 150 crew')],
+    [/fleece|midlayer/, () => 'grid fleece hoodie'],
+    [/sock/, () => 'merino hiking crew socks'],
+    [/hardshell/, () => 'alpine shell jacket'],
+    [/rain shell|wind\/rain/, () => 'torrent rain jacket'],
+    [/overtrousers/, () => 'storm overtrousers'],
+    [/puffy/, () => 'ridgeline down jacket'],
+    [/beanie/, () => 'merino beanie'],
+    [/buff|neck gaiter/, () => 'merino neck gaiter'],
+    [/sleeping bag liner/, () => 'silk sleeping bag liner'],
+    [/first-aid|first aid/, () => 'wilderness first aid kit'],
+    [/emergency bivy|space blanket/, () => 'emergency bivvy'],
+    [/water filter|purification/, () => 'purifier filter bottle'],
+    [/water bottles|reservoir/, () => 'collapsible bottle'],
+    [/gaiters for/, () => 'trail gaiters'],
+    [/dry bags/, () => 'dry bag trio'],
+    [/camp chair/, () => 'lightweight camp chair'],
+    [/\bgps\b/, () => 'satellite messenger'],
+];
+
+const SHOP_GROUPS = ['essentials', 'clothing', 'shelter_and_sleep', 'navigation_and_safety', 'food_and_water', 'activity_specific', 'optional_items'];
+
+/**
+ * Best-effort WKND shop matches for checklist items: the checklist never depends on the shop.
+ * @returns {Promise<{ shop_matches: object[], shop_status: 'ok'|'none'|'unavailable' }>}
+ */
+async function matchShopGear(extra, lists, ctx) {
+    const wanted = [];
+    SHOP_GROUPS.forEach((group) => (lists[group] || []).forEach((item) => {
+        const text = item.toLowerCase();
+        const rule = SHOP_RULES.find(([re]) => re.test(text));
+        if (rule) wanted.push({ group, item, phrase: rule[1](text, ctx) });
+    }));
+    if (!wanted.length) return { shop_matches: [], shop_status: 'none' };
+    const phrases = [...new Set(wanted.map((w) => w.phrase))];
+    let products;
+    try {
+        products = await bestMatches(extra, phrases, { timeoutMs: 6000 });
+    } catch {
+        return { shop_matches: [], shop_status: 'unavailable' };
+    }
+    const byPhrase = new Map(phrases.map((p, i) => [p, products[i]]));
+    const shop_matches = wanted
+        .map(({ group, item, phrase }) => {
+            const product = byPhrase.get(phrase);
+            if (!product) return null;
+            const compact = {
+                sku: product.sku, name: product.name, type: product.type, url: product.url,
+                image: product.image ? product.image.replace(/([?&])width=\d+/, '$1width=96') : null,
+                image_alt: product.image_alt, in_stock: product.in_stock, price: product.price,
+            };
+            return { group, item, product: compact };
+        })
+        .filter(Boolean);
+    return { shop_matches, shop_status: shop_matches.length ? 'ok' : 'none' };
+}
 
 const MOCK_DATA = [
     { adventure_id: 'patagonia-trek', name: 'W Circuit: 9 Days, 115 km', activity: 'Hiking', landscape: 'Mountains', destination: 'Torres del Paine', country: 'Chile', experience_level: 'Advanced', trip_length_days: 9, duration: '9 days · 115 km', verified_status: 'Verified · February 2026' },
@@ -29,6 +94,8 @@ const EMPTY_CHECKLIST = {
     known_weight_grams: 0,
     unresolved_conditions: [],
     safety_note: null,
+    shop_matches: [],
+    shop_status: null,
 };
 
 function isCold(conditions, season) {
@@ -186,8 +253,19 @@ const handler = async ({
     }
     summaryBits.push('Technical terrain and cold routes assume the matching competence; equipment alone does not make the route safe.');
 
+    const { shop_matches, shop_status } = await matchShopGear(extra, {
+        essentials, clothing, shelter_and_sleep, navigation_and_safety, food_and_water, activity_specific, optional_items,
+    }, { cold, wet, days });
+    let shopText = '';
+    if (shop_matches.length) {
+        const listed = shop_matches.map((m) => `- ${m.item} → ${m.product.name} [sku ${m.product.sku}] ${formatMoney({ value: m.product.price.min, currency: m.product.price.currency })}${m.product.type === 'configurable' ? ' (choose options)' : ''}`);
+        shopText = `\n\nAvailable in the WKND shop (AUD incl. GST; add-shop-cart-items adds them to the shopper's cart, get-shop-product shows options):\n${listed.join('\n')}`;
+    } else if (shop_status === 'unavailable') {
+        shopText = '\n\nThe WKND shop could not be checked for matching gear right now.';
+    }
+
     return {
-        content: [{ type: 'text', text: summaryBits.join(' ') }],
+        content: [{ type: 'text', text: `${summaryBits.join(' ')}${shopText}` }],
         // structuredContent — flat single-object detail shape (widget reads sc directly, no wrapper key)
         structuredContent: {
             checklist_title,
@@ -201,6 +279,8 @@ const handler = async ({
             known_weight_grams,
             unresolved_conditions,
             safety_note,
+            shop_matches,
+            shop_status,
         },
     };
 };

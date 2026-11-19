@@ -1,3 +1,10 @@
+// The WKND shop lookup is mocked so these tests never depend on the live Commerce service.
+jest.mock('../../actions/lib/commerce.js', () => ({
+    ...jest.requireActual('../../actions/lib/commerce.js'),
+    bestMatches: jest.fn(async (_extra, phrases) => phrases.map(() => null)),
+}));
+
+const { bestMatches } = require('../../actions/lib/commerce.js');
 const handler = require('../../actions/build-gear-checklist/index.js');
 
 const VALID = {
@@ -80,5 +87,56 @@ describe('build_gear_checklist handler', () => {
         });
         expect(out.structuredContent.shelter_and_sleep.join(' ').toLowerCase()).not.toMatch(/tent/);
         expect(out.structuredContent.clothing.join(' ').toLowerCase()).not.toMatch(/puffy/);
+    });
+});
+
+describe('build_gear_checklist WKND shop matches', () => {
+    const product = (sku, name, type = 'simple') => ({
+        sku, name, type, url: `https://wknd-adventures.run.place/shop/products/${sku.toLowerCase()}`,
+        image: null, image_alt: name, in_stock: true, description: 'x', attributes: {}, options: [],
+        price: { currency: 'AUD', min: 69, max: 69, regular: 69 },
+    });
+
+    test('matches sellable checklist items to WKND products in one lookup', async () => {
+        bestMatches.mockImplementationOnce(async (_extra, phrases) => phrases.map((phrase) => {
+            if (phrase === 'alpine start headlamp') return product('WKND-LGT-001', 'Alpine Start Headlamp 400');
+            if (phrase === 'expedition 65 backpack') return product('WKND-PCK-003', 'Expedition 65 Backpack', 'configurable');
+            return null;
+        }));
+        const out = await handler(VALID);
+        expect(bestMatches).toHaveBeenLastCalledWith(undefined, expect.any(Array), { timeoutMs: 6000 });
+        const phrases = bestMatches.mock.calls.at(-1)[1];
+        expect(new Set(phrases).size).toBe(phrases.length);
+        expect(phrases).toEqual(expect.arrayContaining(['expedition 65 backpack', 'merino 250 zip neck', 'alpine shell jacket']));
+        expect(phrases).not.toContain(expect.stringMatching(/tent|stove/));
+        expect(out.structuredContent.shop_status).toBe('ok');
+        expect(out.structuredContent.shop_matches).toEqual([
+            { group: 'essentials', item: '65–75L backpack with rain cover', product: expect.objectContaining({ sku: 'WKND-PCK-003', type: 'configurable' }) },
+            { group: 'essentials', item: 'Headlamp + spare batteries', product: expect.objectContaining({ sku: 'WKND-LGT-001', price: expect.objectContaining({ min: 69 }) }) },
+        ]);
+        expect(out.structuredContent.shop_matches[0].product).not.toHaveProperty('description');
+        expect(out.content[0].text).toMatch(/Headlamp \+ spare batteries → Alpine Start Headlamp 400 \[sku WKND-LGT-001\]/);
+        expect(out.content[0].text).toMatch(/Expedition 65 Backpack \[sku WKND-PCK-003\] A\$69\.00 \(choose options\)/);
+    });
+
+    test('mild trips map to lighter gear', async () => {
+        await handler({ activity: 'Hiking', terrain: 'trail', duration_days: 2, season: 'summer', conditions: 'mild and dry' });
+        const phrases = bestMatches.mock.calls.at(-1)[1];
+        expect(phrases).toEqual(expect.arrayContaining(['trek 45 backpack', 'merino 150 crew', 'torrent rain jacket']));
+        expect(phrases).not.toContain('ridgeline down jacket');
+    });
+
+    test('the checklist still works when the shop is unavailable', async () => {
+        bestMatches.mockRejectedValueOnce(new Error('down'));
+        const out = await handler(VALID);
+        expect(out.structuredContent.essentials.length).toBeGreaterThan(0);
+        expect(out.structuredContent).toMatchObject({ shop_status: 'unavailable', shop_matches: [] });
+        expect(out.content[0].text).toMatch(/could not be checked/);
+    });
+
+    test('no matches leaves the checklist unchanged', async () => {
+        const out = await handler(VALID);
+        expect(out.structuredContent).toMatchObject({ shop_status: 'none', shop_matches: [] });
+        expect(out.content[0].text).not.toMatch(/WKND shop/);
     });
 });
