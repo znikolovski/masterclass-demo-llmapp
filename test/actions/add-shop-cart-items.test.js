@@ -42,7 +42,26 @@ describe('add-shop-cart-items', () => {
         fakeCommerce(routes())
         const result = await handler({ sku: 'WKND-JKT-003', options: { size: 'M' } }, shopper())
         expect(result.structuredContent.error).toMatchObject({ code: 'options_required', message: expect.stringMatching(/Choose Colour/) })
-        expect(global.fetch.calls.map((c) => c.operation)).toEqual(['ShopProducts'])
+        expect(global.fetch.calls.map((c) => c.operation)).toEqual(['ShopProducts', 'ShopVariants'])
+    })
+
+    test('refuses a sold-out combination even when each option is in stock, before touching the cart', async () => {
+        fakeCommerce(routes({
+            ShopVariants: () => ({ data: { v0: { variants: [{ selections: ['Y29sb3Ivb2NlYW4=', 'c2l6ZS9t'], product: { inStock: false } }] } } })
+        }))
+        const result = await handler({ sku: 'WKND-JKT-003', options: { colour: 'Deep Ocean', size: 'M' } }, shopper())
+        expect(result.structuredContent.error).toMatchObject({
+            code: 'sold_out', message: 'Torrent Rain Jacket is sold out in Deep Ocean / M. Choose another colour or size.'
+        })
+        expect(global.fetch.calls.map((c) => c.operation)).toEqual(['ShopProducts', 'ShopVariants'])
+    })
+
+    test('explains a variant that sold out between the check and the add', async () => {
+        fakeCommerce(routes({
+            ShopAdd: () => ({ data: { addProductsToCart: { cart: cart(), user_errors: [{ code: 'NOT_SALABLE', message: 'Product that you are trying to add is not available.' }] } } })
+        }))
+        const result = await handler({ sku: 'WKND-JKT-003', options: { colour: 'Deep Ocean', size: 'M' } }, shopper())
+        expect(result.structuredContent.error).toMatchObject({ code: 'not_added', message: 'Not added: That item has just sold out in the option you chose.' })
     })
 
     test('refuses sold-out choices', async () => {

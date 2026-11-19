@@ -1,6 +1,7 @@
 // One WKND shop product: options with live stock, and the exact variant when options are given.
 const {
-  getProducts, refineProduct, resolveOptions, failure, ShopError, text, formatMoney,
+  getProducts, refineProduct, resolveOptions, attachSoldOutVariants, soldOutText, failure, ShopError, text,
+  formatMoney,
 } = require('../lib/commerce.js');
 const { withAnalytics } = require('../lib/analytics.js');
 
@@ -12,6 +13,7 @@ const handler = async (args = {}, extra) => {
     if (!SKU.test(sku)) throw new ShopError(400, 'invalid_sku', 'Provide the product SKU from a shop search result.');
     const [product] = await getProducts(extra, [sku]);
     if (!product) throw new ShopError(404, 'product_not_found', `No WKND product has SKU ${sku}.`);
+    await attachSoldOutVariants(extra, [product], { timeoutMs: 10000 });
 
     let variant = null;
     let selection = null;
@@ -39,6 +41,7 @@ const handler = async (args = {}, extra) => {
       variant ? `Selected variant ${variant.sku}: ${price}, ${variant.in_stock ? 'in stock' : 'sold out'}.` : `From ${price}${product.in_stock ? '' : ' — sold out'}.`,
       product.description,
       ...product.options.map((o) => `${o.title}: ${o.values.map((v) => `${v.title}${v.in_stock ? '' : ' (sold out)'}`).join(', ')}`),
+      soldOutText(product),
     ];
     if (selection?.missing.length) lines.push(`Still to choose: ${selection.missing.join(', ')}.`);
     return {

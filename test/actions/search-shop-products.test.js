@@ -105,6 +105,31 @@ describe('search-shop-products', () => {
         expect(result.structuredContent).toMatchObject({ category: null, relaxed: ['category'] })
     })
 
+    test('marks sold-out option combinations for the widget and the model', async () => {
+        fakeCommerce({
+            ShopSearch: () => found(jacketView(), lampView()),
+            ShopVariants: (v) => {
+                expect(v).toEqual({ s0: 'WKND-JKT-003' })
+                return { data: { v0: { variants: [
+                    { selections: ['Y29sb3Ivb2NlYW4=', 'c2l6ZS9t'], product: { inStock: false } },
+                    { selections: ['Y29sb3IvY2hhbGs=', 'c2l6ZS9t'], product: { inStock: true } }
+                ] } } }
+            }
+        })
+        const result = await handler({ query: 'rain' }, {})
+        const [jacket, lamp] = result.structuredContent.products
+        expect(jacket.sold_out).toEqual([['Y29sb3Ivb2NlYW4=', 'c2l6ZS9t']])
+        expect(lamp.sold_out).toBeUndefined()
+        expect(result.content[0].text).toMatch(/Torrent Rain Jacket .* — Sold out: Deep Ocean \/ M/)
+    })
+
+    test('still returns results when variant stock cannot be read', async () => {
+        fakeCommerce({ ShopSearch: () => found(jacketView()), ShopVariants: () => { throw new Error('down') } })
+        const result = await handler({ query: 'rain' }, {})
+        expect(result.isError).toBeUndefined()
+        expect(result.structuredContent.products[0].sold_out).toBeUndefined()
+    })
+
     test('caches the category list', async () => {
         fakeCommerce({ ShopCategories: CATEGORIES, ShopSearch: () => found(jacketView()) })
         await handler({ category: 'jackets' }, {})

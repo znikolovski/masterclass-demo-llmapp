@@ -291,6 +291,55 @@ function normalizeProduct(view) {
 const CATEGORY_TTL_MS = 10 * 60 * 1000;
 let categoryCache = null;
 
+/**
+ * Adds `sold_out` (option value id lists) to configurable products: a combination such as
+ * "Glacier Blue / M" can be sold out while each value is in stock on its own. One aliased request;
+ * on failure the field is left unset and per-value stock still applies.
+ */
+async function attachSoldOutVariants(extra, products, { timeoutMs } = {}) {
+  const configurable = (products || []).filter((p) => p?.type === 'configurable').slice(0, 12);
+  if (!configurable.length) return products;
+  const vars = {};
+  const fields = configurable.map((p, i) => {
+    vars[`s${i}`] = p.sku;
+    return `v${i}: variants(sku: $s${i}) { variants { selections product { inStock } } }`;
+  });
+  const query = `query ShopVariants(${configurable.map((_, i) => `$s${i}: String!`).join(', ')}) { ${fields.join(' ')} }`;
+  try {
+    const { data } = await graphql(extra, query, vars, { timeoutMs });
+    configurable.forEach((p, i) => {
+      const list = data?.[`v${i}`]?.variants;
+      if (!Array.isArray(list)) return;
+      p.sold_out = list
+        .filter((v) => v?.product?.inStock === false && Array.isArray(v.selections))
+        .map((v) => v.selections.filter((s) => typeof s === 'string'));
+    });
+  } catch {
+    // availability per option value still applies
+  }
+  return products;
+}
+
+/** Option value titles for value ids, in option order ("Glacier Blue / M"). */
+function comboTitle(product, valueIds) {
+  return (product?.options || [])
+    .map((o) => o.values.find((v) => valueIds.includes(v.id))?.title)
+    .filter(Boolean)
+    .join(' / ');
+}
+
+/** "Sold out: Glacier Blue / M, Basalt Black / XS" for the model, or '' when none. */
+function soldOutText(product) {
+  const combos = (product?.sold_out || []).map((c) => comboTitle(product, c)).filter(Boolean);
+  return combos.length ? `Sold out: ${combos.join(', ')}` : '';
+}
+
+/** Whether the exact variant for these option value ids is sold out. */
+function isSoldOutCombination(product, valueIds) {
+  return (product?.sold_out || []).some((combo) => combo.length === valueIds.length
+    && combo.every((id) => valueIds.includes(id)));
+}
+
 /** Known category paths and names (cached per container). */
 async function categoryList(extra) {
   if (categoryCache && Date.now() < categoryCache.expires) return categoryCache.list;
@@ -659,6 +708,10 @@ module.exports = {
   refineProduct,
   bestMatches,
   resolveOptions,
+  attachSoldOutVariants,
+  isSoldOutCombination,
+  comboTitle,
+  soldOutText,
   normalizeProduct,
   normalizeCart,
   loadCart,

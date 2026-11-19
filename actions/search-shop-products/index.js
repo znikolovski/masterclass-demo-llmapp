@@ -1,6 +1,6 @@
 // Search the WKND Adventures shop (live Commerce catalog: GST-inclusive AUD prices and stock).
 const {
-  searchProducts, failure, ShopError, text, formatMoney,
+  searchProducts, attachSoldOutVariants, soldOutText, failure, ShopError, text, formatMoney,
 } = require('../lib/commerce.js');
 const { withAnalytics } = require('../lib/analytics.js');
 
@@ -19,7 +19,8 @@ function optionText(p) {
 }
 
 function productLine(p) {
-  return `- ${p.name} [sku ${p.sku}] — ${priceText(p)}${p.in_stock ? '' : ' — sold out'}${p.options.length ? ` — ${optionText(p)}` : ''}`;
+  const soldOut = soldOutText(p);
+  return `- ${p.name} [sku ${p.sku}] — ${priceText(p)}${p.in_stock ? '' : ' — sold out'}${p.options.length ? ` — ${optionText(p)}` : ''}${soldOut ? ` — ${soldOut}` : ''}`;
 }
 
 const handler = async (args = {}, extra) => {
@@ -48,6 +49,7 @@ const handler = async (args = {}, extra) => {
       inStockOnly: args.in_stock_only !== false,
       limit,
     });
+    await attachSoldOutVariants(extra, products, { timeoutMs: 10000 });
     const structuredContent = {
       view: 'products',
       query: query || null,

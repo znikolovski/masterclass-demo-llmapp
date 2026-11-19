@@ -1,8 +1,9 @@
 // Add one explicitly chosen product/variant to the signed-in shopper's WKND cart.
 // Flat arguments (sku, quantity, options, cart_version): the LLM Apps UI has no array type.
 const {
-  requireShopper, loadCart, assertVersion, getProducts, resolveOptions, graphql, normalizeCart,
-  failure, ShopError, cartText, text, queries, constants,
+  requireShopper, loadCart, assertVersion, getProducts, resolveOptions, attachSoldOutVariants,
+  isSoldOutCombination, comboTitle, graphql, normalizeCart, failure, ShopError, cartText, text, queries,
+  constants,
 } = require('../lib/commerce.js');
 const { withAnalytics } = require('../lib/analytics.js');
 
@@ -30,6 +31,7 @@ const handler = async (args = {}, extra) => {
     }
 
     const products = await getProducts(extra, [...new Set(items.map((i) => i.sku))]);
+    await attachSoldOutVariants(extra, products);
     const bySku = new Map(products.map((p) => [p.sku, p]));
     const cartItems = items.map((item) => {
       const product = bySku.get(item.sku);
@@ -46,6 +48,11 @@ const handler = async (args = {}, extra) => {
       if (selection.unavailable.length) {
         throw new ShopError(409, 'sold_out', `${product.name} is sold out in ${selection.unavailable.join(', ')}.`);
       }
+      // Each value can be in stock while this exact combination is not.
+      if (isSoldOutCombination(product, selection.ids)) {
+        const choices = product.options.map((o) => o.title.toLowerCase()).join(' or ');
+        throw new ShopError(409, 'sold_out', `${product.name} is sold out in ${comboTitle(product, selection.ids)}. Choose another ${choices}.`);
+      }
       return { sku: item.sku, quantity: item.quantity, selected_options: selection.ids };
     });
 
@@ -57,7 +64,9 @@ const handler = async (args = {}, extra) => {
       throw new ShopError(400, 'shop_request_rejected', text(errors[0]?.message, 300) || 'The shop could not add those items.');
     }
     const cart = normalizeCart(result.cart);
-    const problems = (result.user_errors || []).map((e) => text(e.message, 300)).filter(Boolean);
+    const problems = (result.user_errors || []).map((e) => (e?.code === 'NOT_SALABLE'
+      ? 'That item has just sold out in the option you chose.'
+      : text(e?.message, 300))).filter(Boolean);
     if (problems.length) {
       return failure(new ShopError(409, 'not_added', `Not added: ${problems.join(' ')}`), { cart });
     }

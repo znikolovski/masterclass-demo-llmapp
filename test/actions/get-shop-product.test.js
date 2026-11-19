@@ -22,7 +22,7 @@ describe('get-shop-product', () => {
             })
         })
         const result = await handler({ sku: 'WKND-JKT-003', options: { colour: 'Deep Ocean', size: 'M' } }, {})
-        expect(global.fetch.calls[1].variables).toEqual({ sku: 'WKND-JKT-003', optionIds: ['Y29sb3Ivb2NlYW4=', 'c2l6ZS9t'] })
+        expect(global.fetch.calls.find((c) => c.operation === 'ShopRefine').variables).toEqual({ sku: 'WKND-JKT-003', optionIds: ['Y29sb3Ivb2NlYW4=', 'c2l6ZS9t'] })
         expect(result.structuredContent).toMatchObject({
             view: 'products', total: 1, selected_variant: { sku: 'WKND-JKT-003-OCEA-M', in_stock: true }, missing_options: [],
             selected_options: { color: 'Y29sb3Ivb2NlYW4=', size: 'c2l6ZS9t' }
