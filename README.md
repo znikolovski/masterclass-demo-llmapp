@@ -457,17 +457,21 @@ shop does not sell (tents, stoves, maps) stays a plain checklist item.
    would, so ChatGPT still prompts the shopper to sign in. `search-shop-products` and
    `get-shop-product` work without sign-in.
    Give each tool with a UI its own **EDS widget**: script URL
-   `https://main--masterclass-demo--znikolovski.aem.page/scripts/aem-embed.js` (the shared EDS
-   embed loader the runtime requires) and widget URL
-   `https://main--masterclass-demo--znikolovski.aem.page/eds-widgets/<tool>-demo` — that is
+   `https://main--masterclass-demo--znikolovski.aem.live/scripts/llmapp-embed.js` (the site's
+   widget loader; it skips the site's `scripts.js` so Gemini can bundle it) and widget URL
+   `https://main--masterclass-demo--znikolovski.aem.live/eds-widgets/<tool>-demo` — that is
    `…/search-shop-products-demo`, `…/get-shop-product-demo`, `…/get-shop-cart-demo` and `…/prepare-shop-checkout-demo`.
    `add-shop-cart-items`, `update-shop-cart-items` and `place-shop-demo-order` have no widget.
    Allow `app` visibility on the add/update tools so the widgets can call them. Give
    `place-shop-demo-order` **`app` visibility only**: the model then cannot place orders; the
    shopper does, with the checkout widget's "Place demo order" button after reviewing the totals.
-4. **Widget CSP:** resource domains `https://delivery-p115476-e1135027.adobeaemcloud.com` (product
-   images), `https://main--masterclass-demo--znikolovski.aem.page`, `https://fonts.googleapis.com`
-   and `https://fonts.gstatic.com`. The widgets call tools through the host bridge only.
+4. **Widget CSP:** connect domains `https://main--masterclass-demo--znikolovski.aem.live`,
+   `https://main--masterclass-demo--znikolovski.aem.page` and `https://edge.adobedc.net`; resource
+   domains the same two EDS origins plus `https://delivery-p115476-e1135027.adobeaemcloud.com`
+   (product images), `https://wknd-adventures.run.place`, `https://fonts.googleapis.com` and
+   `https://fonts.gstatic.com`. Leave **Domain** empty: it requests a host-specific sandbox origin,
+   not the site serving the widget. `entry.js` drops an `*.aem.page`/`*.aem.live` domain anyway,
+   because ChatGPT cannot render a widget with it. The widgets call tools through the host bridge only.
 5. **Input schemas** (all objects use `"additionalProperties": false`):
 
    | Tool | Properties |
