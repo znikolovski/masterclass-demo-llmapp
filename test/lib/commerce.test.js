@@ -79,6 +79,12 @@ describe('graphql', () => {
         expect(global.fetch.calls[0].headers.Authorization).toBeUndefined()
     })
 
+    test('never reuses a pooled connection (stale after a frozen container)', async () => {
+        fakeCommerce({ ShopProducts: () => ({ data: { products: [] } }) })
+        await graphql({}, 'query ShopProducts { products(skus: []) { sku } }')
+        expect(global.fetch.calls[0].headers.Connection).toBe('close')
+    })
+
     test('refuses to sign without a configured secret', async () => {
         const extra = { ...shopper(), variables: {} }
         global.fetch = jest.fn()

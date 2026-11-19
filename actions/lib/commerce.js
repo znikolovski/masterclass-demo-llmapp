@@ -147,7 +147,11 @@ function assertion(shopper, extra, orderExpect) {
  */
 async function graphql(extra, query, variables = {}, { shopper, orderExpect, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
   const url = graphqlUrl(extra);
-  const headers = { 'Content-Type': 'application/json', Accept: 'application/json', 'Cache-Control': 'no-store' };
+  // Runtime freezes idle containers; a pooled keep-alive socket is then silently dropped upstream
+  // (NAT idle timeout) and the next request hangs until the abort. One fresh connection per call.
+  const headers = {
+    'Content-Type': 'application/json', Accept: 'application/json', 'Cache-Control': 'no-store', Connection: 'close',
+  };
   if (shopper) {
     headers.Authorization = `Bearer ${assertion(shopper, extra, orderExpect)}`;
     headers['X-WKND-Delegation'] = 'mcp';
