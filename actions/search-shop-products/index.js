@@ -4,7 +4,8 @@ const {
 } = require('../lib/commerce.js');
 const { withAnalytics } = require('../lib/analytics.js');
 
-const CATEGORY = /^[a-z0-9-]+(?:\/[a-z0-9-]+)*$/;
+// A category path ("apparel/jackets") or name ("Jackets", "Base & Mid Layers"); resolved to a path.
+const CATEGORY = /^[a-z0-9][a-z0-9 &/-]*$/;
 
 function priceText(p) {
   if (p.price.min === null) return 'price unavailable';
@@ -26,7 +27,7 @@ const handler = async (args = {}, extra) => {
     const query = text(args.query, 200);
     const category = text(args.category, 100).toLowerCase();
     if (category && !CATEGORY.test(category)) {
-      throw new ShopError(400, 'invalid_category', 'Use a category path such as "apparel/jackets" or "accessories/packs".');
+      throw new ShopError(400, 'invalid_category', 'Use a category such as "jackets", "apparel/jackets" or "accessories/packs".');
     }
     const toPrice = (v) => (v === undefined || v === null || v === '' ? undefined : Number(v));
     const minPrice = toPrice(args.min_price);
@@ -36,7 +37,9 @@ const handler = async (args = {}, extra) => {
       throw new ShopError(400, 'invalid_price_range', 'Use a non-negative AUD price range where min_price is at most max_price.');
     }
     const limit = Math.min(Math.max(Number.parseInt(args.limit, 10) || 6, 1), 12);
-    const { total, products } = await searchProducts(extra, {
+    const {
+      total, products, category: categoryPath, relaxed,
+    } = await searchProducts(extra, {
       phrase: query,
       category: category || undefined,
       activity: text(args.activity, 60) || undefined,
@@ -50,14 +53,19 @@ const handler = async (args = {}, extra) => {
       query: query || null,
       total,
       products,
+      category: categoryPath,
+      relaxed,
     };
+    const relaxedText = relaxed.length
+      ? ` Nothing matched the ${relaxed.map((f) => (f === 'category' ? `category "${category}"` : `activity "${args.activity}"`)).join(' and ')}, so ${relaxed.length > 1 ? 'those filters were' : 'that filter was'} dropped.`
+      : '';
     if (!products.length) {
       return {
-        content: [{ type: 'text', text: `No WKND gear matched${query ? ` "${query}"` : ''}${category ? ` in ${category}` : ''}. Try a broader search or remove filters.` }],
+        content: [{ type: 'text', text: `No WKND gear matched${query ? ` "${query}"` : ''}.${relaxedText} Try a broader search or remove filters.` }],
         structuredContent,
       };
     }
-    const summary = `Found ${total} WKND product${total === 1 ? '' : 's'}${query ? ` for "${query}"` : ''}; showing ${products.length}. Prices are AUD incl. GST. Configurable items need every option chosen before adding to the cart.`;
+    const summary = `Found ${total} WKND product${total === 1 ? '' : 's'}${query ? ` for "${query}"` : ''}${categoryPath && !relaxed.includes('category') ? ` in ${categoryPath}` : ''}; showing ${products.length}.${relaxedText} Prices are AUD incl. GST. Configurable items need every option chosen before adding to the cart.`;
     return {
       content: [{ type: 'text', text: `${summary}\n${products.map(productLine).join('\n')}` }],
       structuredContent,

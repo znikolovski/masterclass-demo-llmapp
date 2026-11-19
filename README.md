@@ -472,7 +472,7 @@ shop does not sell (tents, stoves, maps) stays a plain checklist item.
 
    | Tool | Properties |
    | --- | --- |
-   | `search-shop-products` | `query` string; `category` string (path such as `apparel/jackets`); `activity` string; `min_price`, `max_price` number (AUD incl. GST); `in_stock_only` boolean (default true); `limit` integer 1–12 |
+   | `search-shop-products` | `query` string (put what the shopper wants here, e.g. "rain jacket"); `category` string (path or name: `apparel/jackets`, `jackets`, `backpacks`); `activity` string (e.g. `Hiking`, `Trekking`); `min_price`, `max_price` number (AUD incl. GST); `in_stock_only` boolean (default true); `limit` integer 1–12. Category names resolve to catalog paths; a category or activity that leaves no results is dropped (activity first) and reported in `relaxed` |
    | `get-shop-product` | `sku` string (required); `options` object of option → value, e.g. `{ "colour": "Deep Ocean", "size": "M" }` |
    | `get-shop-cart` | none |
    | `add-shop-cart-items` | `sku` string (required); `quantity` integer 1–20 (default 1); `options` object of option → value, e.g. `{ "colour": "Deep Ocean", "size": "M" }`; `cart_version` string. One product per call (the UI has no array type) |

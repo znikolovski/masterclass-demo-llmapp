@@ -218,6 +218,12 @@ const SEARCH_QUERY = `query ShopSearch($phrase: String!, $filter: [SearchClauseI
   }
 }`;
 
+const CATEGORIES_QUERY = `query ShopCategories {
+  productSearch(phrase: "", page_size: 1, current_page: 1) {
+    facets { attribute buckets { ... on CategoryView { path name } } }
+  }
+}`;
+
 const PRODUCTS_QUERY = `query ShopProducts($skus: [String]) { products(skus: $skus) { ${PRODUCT_FIELDS} } }`;
 
 const REFINE_QUERY = `query ShopRefine($sku: String!, $optionIds: [String!]!) {
@@ -286,22 +292,83 @@ function normalizeProduct(view) {
   };
 }
 
+const CATEGORY_TTL_MS = 10 * 60 * 1000;
+let categoryCache = null;
+
+/** Known category paths and names (cached per container). */
+async function categoryList(extra) {
+  if (categoryCache && Date.now() < categoryCache.expires) return categoryCache.list;
+  const { data, errors } = await graphql(extra, CATEGORIES_QUERY);
+  ensureNoErrors(errors);
+  const facet = (data.productSearch?.facets || []).find((f) => f?.attribute === 'categoryPath');
+  const list = (facet?.buckets || [])
+    .filter((b) => typeof b?.path === 'string' && b.path)
+    .map((b) => ({ path: b.path.toLowerCase(), name: text(b.name, 100).toLowerCase() }));
+  if (list.length) categoryCache = { list, expires: Date.now() + CATEGORY_TTL_MS };
+  return list;
+}
+
+const singular = (word) => word.replace(/(?<!s)s$/, '');
+const categoryKey = (value) => singular(value.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, ' ').trim());
+
+/**
+ * Maps what a shopper or model calls a category ("jackets", "Backpacks", "apparel/jackets") to a
+ * catalog category path, or null when nothing matches.
+ */
+async function resolveCategory(extra, value) {
+  const wanted = categoryKey(value);
+  if (!wanted) return null;
+  const list = await categoryList(extra);
+  const keys = (c) => [c.path, c.path.split('/').pop(), c.name].map(categoryKey);
+  const exact = list.find((c) => keys(c).includes(wanted));
+  if (exact) return exact.path;
+  const partial = list.filter((c) => keys(c).some((k) => k.split(' ').includes(wanted)));
+  return partial.length === 1 ? partial[0].path : null;
+}
+
+/**
+ * Catalog search. Category and activity narrow the search, but when they leave nothing they are
+ * relaxed (activity first, then category) and reported in `relaxed`, so a guessed filter does not
+ * hide gear that matches the phrase.
+ */
 async function searchProducts(extra, {
   phrase = '', category, activity, minPrice, maxPrice, inStockOnly, limit,
 }) {
-  const filter = [{ attribute: 'visibility', in: ['Search', 'Catalog, Search'] }];
-  if (category) filter.push({ attribute: 'categoryPath', eq: category });
-  if (activity) filter.push({ attribute: 'activity', eq: activity });
+  const base = [{ attribute: 'visibility', in: ['Search', 'Catalog, Search'] }];
   if (minPrice !== undefined || maxPrice !== undefined) {
-    filter.push({ attribute: 'price', range: { from: minPrice ?? 0, to: maxPrice ?? 1000000 } });
+    base.push({ attribute: 'price', range: { from: minPrice ?? 0, to: maxPrice ?? 1000000 } });
   }
-  if (inStockOnly) filter.push({ attribute: 'inStock', eq: 'true' });
-  const { data, errors } = await graphql(extra, SEARCH_QUERY, { phrase, filter, pageSize: limit });
-  ensureNoErrors(errors);
-  const result = data.productSearch || {};
+  if (inStockOnly) base.push({ attribute: 'inStock', eq: 'true' });
+  const relaxed = [];
+  let categoryPath;
+  if (category) {
+    categoryPath = await resolveCategory(extra, category).catch(() => null);
+    if (!categoryPath) relaxed.push('category');
+  }
+  const attempts = [{ categoryPath, activity }];
+  if (activity) attempts.push({ categoryPath, activity: undefined });
+  if (categoryPath) attempts.push({ categoryPath: undefined, activity: undefined });
+  let result = {};
+  for (let i = 0; i < attempts.length; i += 1) {
+    const attempt = attempts[i];
+    const filter = [...base];
+    if (attempt.categoryPath) filter.push({ attribute: 'categoryPath', eq: attempt.categoryPath });
+    if (attempt.activity) filter.push({ attribute: 'activity', eq: attempt.activity });
+    // eslint-disable-next-line no-await-in-loop
+    const { data, errors } = await graphql(extra, SEARCH_QUERY, { phrase, filter, pageSize: limit });
+    ensureNoErrors(errors);
+    result = data.productSearch || {};
+    if (num(result.total_count) || i === attempts.length - 1) {
+      if (activity && !attempt.activity) relaxed.push('activity');
+      if (categoryPath && !attempt.categoryPath) relaxed.push('category');
+      break;
+    }
+  }
   return {
     total: num(result.total_count) ?? 0,
     products: (result.items || []).map((i) => normalizeProduct(i?.productView)).filter(Boolean),
+    category: categoryPath || null,
+    relaxed,
   };
 }
 
