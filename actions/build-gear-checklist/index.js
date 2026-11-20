@@ -32,6 +32,8 @@ const SHOP_RULES = [
     [/\bgps\b/, () => 'satellite messenger'],
 ];
 
+const SHOP_TIMEOUT_MS = 20000;
+
 const SHOP_GROUPS = ['essentials', 'clothing', 'shelter_and_sleep', 'navigation_and_safety', 'food_and_water', 'activity_specific', 'optional_items'];
 
 /**
@@ -49,7 +51,8 @@ async function matchShopGear(extra, lists, ctx) {
     const phrases = [...new Set(wanted.map((w) => w.phrase))];
     let products;
     try {
-        products = await bestMatches(extra, phrases, { timeoutMs: 6000 });
+        // Long enough for a cold Commerce backend (~13 s measured); warm lookups take < 1 s.
+        products = await bestMatches(extra, phrases, { timeoutMs: SHOP_TIMEOUT_MS });
     } catch {
         return { shop_matches: [], shop_status: 'unavailable' };
     }

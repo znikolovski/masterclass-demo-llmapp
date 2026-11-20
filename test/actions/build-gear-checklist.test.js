@@ -104,7 +104,7 @@ describe('build_gear_checklist WKND shop matches', () => {
             return null;
         }));
         const out = await handler(VALID);
-        expect(bestMatches).toHaveBeenLastCalledWith(undefined, expect.any(Array), { timeoutMs: 6000 });
+        expect(bestMatches).toHaveBeenLastCalledWith(undefined, expect.any(Array), { timeoutMs: 20000 });
         const phrases = bestMatches.mock.calls.at(-1)[1];
         expect(new Set(phrases).size).toBe(phrases.length);
         expect(phrases).toEqual(expect.arrayContaining(['expedition 65 backpack', 'merino 250 zip neck', 'alpine shell jacket']));
