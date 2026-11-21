@@ -508,11 +508,11 @@ never blocks an ordinary `coupon_code`). They use only Commerce's reviewed-versi
 (`Cart.wknd_cart_version`, `applyWkndRecoveryOffer` and `removeWkndRecoveryOffer`,
 wknd-commerce#7):
 
-- When that contract is published (checked by live schema introspection, cached for 60 seconds per
-  endpoint; never assumed), every cart read and cart mutation selects the opaque server token and
-  hashes it into `cart_version`. The shopper's reviewed 16-hex `cart_version` therefore pins exactly
-  one backend cart revision, and the token recorded with that reviewed cart is what is sent as
-  `expected_cart_version`. The token is never returned to the model or widgets.
+- Every cart read and cart mutation selects Commerce's revision token (`wknd_cart_version`,
+  `v<revision>`) and hashes it, raw, into `cart_version`. The shopper's reviewed 16-hex
+  `cart_version` therefore pins exactly one backend cart revision: the handler asserts it first,
+  then sends the token from that same read as `expected_cart_version` (it never fetches a fresh
+  token after the check). The token is never returned to the model or widgets, nor logged.
 - `apply_offer: true` requires the reviewed `cart_version`, then calls
   `applyWkndRecoveryOffer(cart_id, expected_cart_version)`. Commerce claims the offer, checks it saves
   strictly more than the current promotion and writes only if the cart is still in the reviewed
@@ -524,19 +524,24 @@ wknd-commerce#7):
   Entitlements, redemptions and ordinary codes are untouched.
 - A Commerce `CART_CHANGED` on any coupon write is a `cart_changed` conflict with the refreshed
   cart; it is never retried.
-- When the contract is not published (or the check fails), both actions fail closed
-  (`REVIEWED_VERSION_UNAVAILABLE`), no generic coupon mutation is used for the protected code, and
-  the offer is shown only as the non-actionable `UNAVAILABLE` state.
+- A missing or malformed token fails closed: both actions return `REVIEWED_VERSION_UNAVAILABLE`
+  without calling Commerce, and the offer is shown only as the non-actionable `UNAVAILABLE` state.
+  There is no generic claim, generic coupon, clear-all or plural-remove fallback for the protected
+  code.
 - `apply_offer: true` with `remove_offer: true` → `conflicting_offer_actions`; either `true` with
   `coupon_code` → `conflicting_discounts`; either `true` without `cart_version` →
   `cart_version_required`. All are rejected before calling Commerce.
 
-Release order: this needs wknd-commerce#7 deployed in the target environment first; until then the
-offer is display-only (`UNAVAILABLE`) and everything else works as before.
+Release order (strict, per environment; there is no runtime fallback or feature flag): deploy
+wknd-commerce#7 to an environment and verify it there, then deploy this app to the same
+environment. Stage readiness does not authorise a Production release. Against an older Commerce
+the cart tools fail explicitly with `shop_contract_unavailable` (502) rather than degrading.
 
 A refusal to apply is an explicit `offer_not_applied` error (`subcode` = `NOT_BENEFICIAL` for
-`OFFER_NOT_BETTER`, `RECOVERY_OFFER_UNAVAILABLE`, `REVIEWED_VERSION_UNAVAILABLE`, or the Commerce
-eligibility code, whose code-free message is shown as-is). `place-shop-demo-order` reports an offer that stopped being
+`OFFER_NOT_BETTER`, `UNAVAILABLE` for `RECOVERY_OFFER_UNAVAILABLE` or anything unexpected,
+`REVIEWED_VERSION_UNAVAILABLE`, or the Commerce eligibility code, whose code-free message is shown
+as-is unless it mentions the cart revision). A failed removal is `offer_not_removed` with the real
+current cart. `place-shop-demo-order` reports an offer that stopped being
 valid as `offer_invalid` with the current cart. Email consent is never changed here; shoppers manage
 it at `https://wknd-adventures.run.place/account`.
 

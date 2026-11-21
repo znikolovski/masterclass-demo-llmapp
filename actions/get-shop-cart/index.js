@@ -9,10 +9,10 @@ const handler = async (_args, extra) => {
   try {
     const shopper = requireShopper(extra);
     const {
-      id, cart, appliedCoupons, reviewed,
+      id, cart, appliedCoupons, serverVersion,
     } = await loadCart(extra, shopper);
     const decision = cart.lines.length
-      ? await loadOffer(extra, shopper, id, appliedCoupons, reviewed)
+      ? await loadOffer(extra, shopper, id, appliedCoupons, serverVersion)
       : { code: null, offer: null };
     hideProtectedCoupons(cart, [decision.code]);
     const note = offerText(decision.offer);

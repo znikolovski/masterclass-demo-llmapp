@@ -44,6 +44,11 @@ const PROTECTED_COUPON_CODES = ['RECOVER10'];
 const OFFER_READ_TIMEOUT_MS = 10000;
 // Commerce eligibility errors whose messages are shown to shoppers as-is.
 const OFFER_ERROR_CODES = ['COUPON_SHOPPER_INELIGIBLE', 'RECOVERY_ALREADY_REDEEMED', 'COUPON_ELIGIBILITY_UNAVAILABLE'];
+// Commerce's opaque cart revision token (Cart.wknd_cart_version, `v<revision>`). Internal only:
+// hashed into cart_version, sent back as expected_cart_version, never output or logged.
+const SERVER_VERSION = /^v(?:0|[1-9][0-9]{0,15})$/;
+// GraphQL validation messages for a field/argument/type the shop's schema doesn't have.
+const SCHEMA_MISMATCH = /^(?:Cannot query field|Unknown argument|Unknown type|Field "[^"]+" argument "[^"]+" of type)/;
 
 class ShopError extends Error {
   constructor(status, code, message, details) {
@@ -190,6 +195,11 @@ async function graphql(extra, query, variables = {}, { shopper, orderExpect, tim
   const authError = errors.find((e) => ['graphql-authentication', 'graphql-authorization'].includes(e?.extensions?.category));
   if (authError) {
     throw new ShopError(401, 'shop_authentication_failed', 'Your WKND sign-in could not be confirmed by the shop. Sign in again; if this persists, the shop configuration needs attention.');
+  }
+  // A document this app needs isn't in the shop's schema (e.g. the shop is older than this app):
+  // fail explicitly rather than degrade. Validation errors carry no execution `path`.
+  if (errors.some((e) => !e?.path && SCHEMA_MISMATCH.test(text(e?.message, 300)))) {
+    throw new ShopError(502, 'shop_contract_unavailable', 'The WKND shop isn’t running the version this app needs yet, so nothing was changed. Please try again later.');
   }
   return { data: body.data || {}, errors };
 }
@@ -534,32 +544,21 @@ const CART_FIELDS = `
   selected_payment_method { code title }`;
 
 /*
- * Cart documents. When Commerce publishes the reviewed-version contract (Cart.wknd_cart_version,
- * applyWkndRecoveryOffer, removeWkndRecoveryOffer), every cart selection includes the opaque server
- * token so it is part of cart_version: the shopper's reviewed cart_version then pins exactly one
- * backend cart revision. Selecting an unpublished field would fail validation, so the variant is
- * chosen by a live schema check (reviewedOfferSupport), never assumed.
+ * Cart documents. Every cart selection includes Commerce's opaque revision token
+ * (Cart.wknd_cart_version), so it is part of cart_version: a shopper's reviewed cart_version pins
+ * exactly one backend cart revision. These need a Commerce release with the reviewed-version
+ * contract; there is no fallback (release Commerce first in each environment, then this app).
  */
-function cartDocs(reviewed) {
-  const fields = reviewed ? `${CART_FIELDS}\n  wknd_cart_version` : CART_FIELDS;
-  return {
-    reviewed,
-    CART_QUERY: `query ShopCart { customerCart { ${fields} } }`,
-    ADD_MUTATION: `mutation ShopAdd($cartId: String!, $items: [CartItemInput!]!) {
+const CART_SELECTION = `${CART_FIELDS}\n  wknd_cart_version`;
+const CART_QUERY = `query ShopCart { customerCart { ${CART_SELECTION} } }`;
+const ADD_MUTATION = `mutation ShopAdd($cartId: String!, $items: [CartItemInput!]!) {
   addProductsToCart(cartId: $cartId, cartItems: $items) {
-    cart { ${fields} }
+    cart { ${CART_SELECTION} }
     user_errors { code message }
   }
-}`,
-    UPDATE_MUTATION: `mutation ShopUpdate($input: UpdateCartItemsInput!) {
-  updateCartItems(input: $input) { cart { ${fields} } errors { code message } }
-}`,
-  };
-}
-const { CART_QUERY, ADD_MUTATION, UPDATE_MUTATION } = cartDocs(false);
-const CAPABILITIES_QUERY = `query ShopCapabilities {
-  m: __type(name: "Mutation") { fields { name } }
-  c: __type(name: "Cart") { fields { name } }
+}`;
+const UPDATE_MUTATION = `mutation ShopUpdate($input: UpdateCartItemsInput!) {
+  updateCartItems(input: $input) { cart { ${CART_SELECTION} } errors { code message } }
 }`;
 const APPLY_OFFER_MUTATION = `mutation ShopApplyOffer($cartId: String!, $expected: String!) {
   applyWkndRecoveryOffer(cart_id: $cartId, expected_cart_version: $expected) { outcome }
@@ -567,37 +566,11 @@ const APPLY_OFFER_MUTATION = `mutation ShopApplyOffer($cartId: String!, $expecte
 const REMOVE_OFFER_MUTATION = `mutation ShopRemoveOffer($cartId: String!, $expected: String!) {
   removeWkndRecoveryOffer(cart_id: $cartId, expected_cart_version: $expected) { outcome }
 }`;
-const CAPABILITY_TTL_MS = 60000;
-const capabilityCache = new Map();
 
-/**
- * Whether this Commerce endpoint publishes the reviewed-version offer contract, from a live
- * introspection (cached briefly per endpoint). Any failure → false (fail closed; not cached).
- */
-async function reviewedOfferSupport(extra) {
-  const url = graphqlUrl(extra);
-  const hit = capabilityCache.get(url);
-  if (hit && hit.until > Date.now()) return hit.value;
-  try {
-    const { data, errors } = await graphql(extra, CAPABILITIES_QUERY, {}, { timeoutMs: OFFER_READ_TIMEOUT_MS });
-    if (errors.length) return false;
-    const mutations = new Set((data.m?.fields || []).map((f) => f?.name));
-    const cartFields = new Set((data.c?.fields || []).map((f) => f?.name));
-    const value = mutations.has('applyWkndRecoveryOffer') && mutations.has('removeWkndRecoveryOffer') && cartFields.has('wknd_cart_version');
-    capabilityCache.set(url, { value, until: Date.now() + CAPABILITY_TTL_MS });
-    return value;
-  } catch {
-    return false;
-  }
-}
-
-/** Cart documents for this endpoint (with the server token when the contract is published). */
-async function shopCartDocs(extra) {
-  return cartDocs(await reviewedOfferSupport(extra));
-}
-
-function resetCapabilityCache() {
-  capabilityCache.clear();
+/** The server revision token if well formed, else null (offer changes then fail closed). */
+function serverVersionOf(cart) {
+  const token = typeof cart?.wknd_cart_version === 'string' ? cart.wknd_cart_version : '';
+  return SERVER_VERSION.test(token) ? token : null;
 }
 const EMAIL_MUTATION = `mutation ShopEmail($input: SetGuestEmailOnCartInput!) {
   setGuestEmailOnCart(input: $input) { cart { id } }
@@ -720,7 +693,7 @@ function normalizeCart(cart) {
       payment_method: cart.selected_payment_method?.code === PAYMENT_METHOD ? PAYMENT_METHOD : null,
     },
   };
-  // The server token (when published) is hashed in, never returned.
+  // Commerce's revision token is hashed in (raw, before any output sanitising), never returned.
   summary.version = cartVersion(summary, text(cart.wknd_cart_version, 120) || null);
   summary.missing = missingForOrder(summary);
   summary.ready = summary.missing.length === 0;
@@ -794,18 +767,16 @@ function missingForOrder(cart) {
 }
 
 async function loadCart(extra, shopper) {
-  const docs = await shopCartDocs(extra);
-  const { data, errors } = await graphql(extra, docs.CART_QUERY, {}, { shopper });
+  const { data, errors } = await graphql(extra, CART_QUERY, {}, { shopper });
   ensureNoErrors(errors);
   const appliedCoupons = (data.customerCart?.applied_coupons || []).map((c) => text(c?.code, 40).toUpperCase()).filter(Boolean);
-  // `appliedCoupons` (raw, may include protected codes) and `serverVersion` (the opaque token
-  // bound into cart.version) are for handler decisions only, never output.
+  // `appliedCoupons` (raw, may include protected codes) and `serverVersion` (Commerce's revision
+  // token, hashed into this same read's cart.version) are for handler decisions only, never output.
   return {
     id: data.customerCart?.id,
     cart: normalizeCart(data.customerCart),
     appliedCoupons,
-    serverVersion: docs.reviewed ? text(data.customerCart?.wknd_cart_version, 120) || null : null,
-    reviewed: docs.reviewed,
+    serverVersion: serverVersionOf(data.customerCart),
   };
 }
 
@@ -818,6 +789,8 @@ const OFFER_COPY = {
   REDEEMED: 'This offer has already been used.',
   UNAVAILABLE: 'The welcome-back offer can’t be checked right now. Please try again shortly.',
   CART_CHANGED: 'Your cart changed while the offer was being applied, so it was not applied. Review the cart and try again.',
+  RECOVERY_ALREADY_REDEEMED: 'This offer has already been used.',
+  COUPON_ELIGIBILITY_UNAVAILABLE: 'The welcome-back offer can’t be checked right now. Please try again shortly.',
   DEFAULT: 'This welcome-back offer isn’t available for this cart.',
 };
 const OFFER_STATUSES = ['SIGN_IN_REQUIRED', 'UNAVAILABLE', 'INELIGIBLE', 'ELIGIBLE', 'CLAIMED', 'REDEEMED'];
@@ -863,17 +836,19 @@ function offerDecision(raw, appliedCoupons = []) {
   });
 }
 
-/** The offer to show with the cart. A failed lookup returns the explicit UNAVAILABLE state. */
-async function loadOffer(extra, shopper, cartId, appliedCoupons, reviewed = true) {
+/**
+ * The offer to show with the cart. A failed lookup returns the explicit UNAVAILABLE state, and so
+ * does a cart without a well-formed server revision token (the offer couldn't be changed safely).
+ */
+async function loadOffer(extra, shopper, cartId, appliedCoupons, serverVersion) {
   if (!cartId) return offerDecision(null, appliedCoupons);
-  // Without the reviewed-version contract the offer can't be applied safely: never actionable.
-  if (!reviewed) return offerDecision(null, appliedCoupons);
+  if (!SERVER_VERSION.test(serverVersion || '')) return offerDecision(null, appliedCoupons);
   try {
     const { data, errors } = await graphql(extra, OFFER_QUERY, { cartId }, { shopper, timeoutMs: OFFER_READ_TIMEOUT_MS });
     if (errors.length) return offerDecision(null, appliedCoupons);
     return offerDecision(data.wkndRecoveryOffer, appliedCoupons);
   } catch (e) {
-    if (e instanceof ShopError && e.code === 'shop_authentication_failed') throw e;
+    if (e instanceof ShopError && ['shop_authentication_failed', 'shop_contract_unavailable'].includes(e.code)) throw e;
     return offerDecision(null, appliedCoupons);
   }
 }
@@ -887,19 +862,23 @@ const REVIEWED_UNAVAILABLE = 'The welcome-back offer can’t be changed here rig
 /**
  * Applies the welcome-back offer with Commerce's reviewed-version mutation: Commerce claims it,
  * checks it saves strictly more than the current promotion, and writes only if the cart is still
- * at `serverVersion` (the token bound into the shopper's reviewed cart_version). The protected
- * code never leaves Commerce. Fails closed when the contract isn't published.
+ * at `serverVersion` — the token from the same read whose cart_version the shopper reviewed (the
+ * caller asserts that first). The protected code never leaves Commerce. No fallback and no retry.
  * @returns {Promise<{ outcome: 'APPLIED'|'ALREADY_APPLIED' }>}
  */
-async function applyOffer(extra, shopper, cartId, serverVersion, reviewed) {
-  if (!reviewed || !serverVersion) throw offerNotApplied('REVIEWED_VERSION_UNAVAILABLE', REVIEWED_UNAVAILABLE);
+async function applyOffer(extra, shopper, cartId, serverVersion) {
+  if (!SERVER_VERSION.test(serverVersion || '')) throw offerNotApplied('REVIEWED_VERSION_UNAVAILABLE', REVIEWED_UNAVAILABLE);
   const { data, errors } = await graphql(extra, APPLY_OFFER_MUTATION, { cartId, expected: serverVersion }, { shopper });
   throwIfCartChanged(errors);
   if (errors.length) {
     const code = text(errors[0]?.extensions?.code, 60);
     if (code === 'OFFER_NOT_BETTER') throw offerNotApplied('NOT_BENEFICIAL');
-    if (OFFER_ERROR_CODES.includes(code)) throw offerNotApplied(code, text(errors[0].message, 200));
-    throw offerNotApplied(code || 'UNAVAILABLE', OFFER_COPY.DEFAULT);
+    if (OFFER_ERROR_CODES.includes(code)) {
+      // Shown as-is unless it mentions the revision token (then the fixed copy for that code).
+      const message = text(errors[0].message, 200);
+      throw offerNotApplied(code, message.includes(serverVersion) || /cart_version/i.test(message) ? undefined : message);
+    }
+    throw offerNotApplied('UNAVAILABLE', OFFER_COPY.DEFAULT);
   }
   const outcome = data.applyWkndRecoveryOffer?.outcome;
   if (!['APPLIED', 'ALREADY_APPLIED'].includes(outcome)) throw offerNotApplied('UNAVAILABLE', OFFER_COPY.DEFAULT);
@@ -908,18 +887,19 @@ async function applyOffer(extra, shopper, cartId, serverVersion, reviewed) {
 
 /**
  * Removes only the welcome-back offer's protected coupon with Commerce's reviewed-version
- * mutation (any other coupon is left alone; entitlements and redemptions untouched).
+ * mutation (any other coupon is left alone; entitlements and redemptions untouched). Same
+ * reviewed-token binding as applyOffer.
  * @returns {Promise<{ removed: boolean }>} removed=false when none was applied (NOT_APPLIED)
  */
-async function removeOffer(extra, shopper, cartId, serverVersion, reviewed) {
-  if (!reviewed || !serverVersion) {
+async function removeOffer(extra, shopper, cartId, serverVersion) {
+  if (!SERVER_VERSION.test(serverVersion || '')) {
     throw new ShopError(409, 'offer_not_removed', REVIEWED_UNAVAILABLE, { subcode: 'REVIEWED_VERSION_UNAVAILABLE' });
   }
   const { data, errors } = await graphql(extra, REMOVE_OFFER_MUTATION, { cartId, expected: serverVersion }, { shopper });
   throwIfCartChanged(errors);
   const outcome = errors.length ? null : data.removeWkndRecoveryOffer?.outcome;
   if (!['REMOVED', 'NOT_APPLIED'].includes(outcome)) {
-    throw new ShopError(409, 'offer_not_removed', 'The welcome-back offer could not be removed. Review your current cart and try again.');
+    throw new ShopError(409, 'offer_not_removed', 'The welcome-back offer could not be removed. Review your current cart and try again.', { subcode: 'UNAVAILABLE' });
   }
   return { removed: outcome === 'REMOVED' };
 }
@@ -964,9 +944,6 @@ module.exports = {
   graphql,
   ensureNoErrors,
   throwIfCartChanged,
-  reviewedOfferSupport,
-  shopCartDocs,
-  resetCapabilityCache,
   searchProducts,
   getProducts,
   refineProduct,
@@ -994,6 +971,7 @@ module.exports = {
   num,
   imageUrl,
   queries: {
+    CART_QUERY,
     ADD_MUTATION,
     UPDATE_MUTATION,
     EMAIL_MUTATION,
@@ -1001,7 +979,6 @@ module.exports = {
     OFFER_QUERY,
     APPLY_OFFER_MUTATION,
     REMOVE_OFFER_MUTATION,
-    CAPABILITIES_QUERY,
     SHIPPING_ADDRESS_MUTATION,
     BILLING_ADDRESS_MUTATION,
     SHIPPING_METHOD_MUTATION,

@@ -136,7 +136,7 @@ const handler = async (args = {}, extra) => {
     const address = args.shipping_address === undefined ? undefined : parseAddress(args.shipping_address);
 
     const {
-      id, cart: before, serverVersion, reviewed,
+      id, cart: before, serverVersion,
     } = await loadCart(extra, shopper);
     if (!before.lines.length) throw new ShopError(400, 'cart_empty', 'Your WKND cart is empty. Add gear before checking out.', { cart: before });
     assertVersion(before, args.cart_version);
@@ -155,15 +155,15 @@ const handler = async (args = {}, extra) => {
       if (errors.length) throw new ShopError(400, 'shop_request_rejected', text(errors[0]?.message, 300) || 'The shop rejected that checkout detail.');
     };
 
-    // serverVersion came from the cart whose cart_version the shopper reviewed (checked above),
-    // so Commerce writes only if the cart is still in exactly that reviewed state.
+    // serverVersion came from the same read whose cart_version was just asserted to be the one the
+    // shopper reviewed, so Commerce writes only if the cart is still in exactly that state.
     if (applyOn) {
-      const applied = await applyOffer(extra, shopper, id, serverVersion, reviewed);
+      const applied = await applyOffer(extra, shopper, id, serverVersion);
       warnings.push(applied.outcome === 'APPLIED'
         ? 'Welcome-back offer applied. The total changed, so review it again before ordering.'
         : 'The welcome-back offer is already applied to this cart, so nothing changed.');
     } else if (removeOn) {
-      const result = await removeOffer(extra, shopper, id, serverVersion, reviewed);
+      const result = await removeOffer(extra, shopper, id, serverVersion);
       warnings.push(result.removed
         ? 'Welcome-back offer removed. The total changed, so review it again before ordering.'
         : 'No welcome-back offer is applied to this cart, so nothing changed.');
@@ -193,10 +193,10 @@ const handler = async (args = {}, extra) => {
     }
 
     const {
-      id: cartId, cart, appliedCoupons: nowApplied, reviewed: nowReviewed,
+      id: cartId, cart, appliedCoupons: nowApplied, serverVersion: nowVersion,
     } = await loadCart(extra, shopper);
     const decision = cart.lines.length
-      ? await loadOffer(extra, shopper, cartId, nowApplied, nowReviewed)
+      ? await loadOffer(extra, shopper, cartId, nowApplied, nowVersion)
       : { code: null, offer: null };
     hideProtectedCoupons(cart, [decision.code]);
     const note = offerText(decision.offer);
