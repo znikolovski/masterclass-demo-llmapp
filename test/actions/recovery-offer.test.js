@@ -448,6 +448,23 @@ describe('welcome-back offer', () => {
             expect(global.fetch.calls.filter((c) => c.operation === 'ShopRemoveCoupons')).toHaveLength(1)
         })
 
+        const CHANGED = () => ({ errors: [{ message: 'Your cart changed while this was being updated. Review the cart and try again.', extensions: { category: 'graphql-input', code: 'CART_CHANGED' } }] })
+
+        test.each([
+            ['apply_offer', { apply_offer: true }, () => ({ cart: withCoupon('TRAILREADY', 20, readyCart), offer: offer() }), { ShopCoupon: CHANGED }],
+            ['remove_offer', { remove_offer: true }, () => ({ cart: withCoupon('RECOVER10', 25, readyCart), offer: offer({ status: 'CLAIMED' }) }), { ShopRemoveCoupons: CHANGED }],
+            ['coupon_code', { coupon_code: 'WKND10' }, () => ({ cart: readyCart(), offer: offer() }), { ShopCoupon: CHANGED }]
+        ])('a Commerce CART_CHANGED on %s is a typed cart_changed conflict with the refreshed cart, never retried', async (_label, args, init, overrides) => {
+            const state = init()
+            fakeCommerce(routes(state, overrides))
+            const result = await prepare({ ...args, cart_version: versionOf(state) }, shopper())
+            expect(result).toMatchObject({ isError: true, structuredContent: { error: { status: 409, code: 'cart_changed' } } })
+            expect(result.structuredContent.cart).toBeDefined()
+            const writes = global.fetch.calls.filter((c) => ['ShopCoupon', 'ShopRemoveCoupons'].includes(c.operation))
+            expect(writes).toHaveLength(1)
+            expectNoCode(result)
+        })
+
         test('a failed removal is an explicit error with the real current cart', async () => {
             const state = { cart: withCoupon('RECOVER10', 25, readyCart), offer: offer({ status: 'CLAIMED' }) }
             fakeCommerce(routes(state, { ShopRemoveCoupons: () => ({ errors: [{ message: 'Cannot remove RECOVER10 right now', extensions: { category: 'graphql' } }] }) }))

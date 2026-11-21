@@ -3,6 +3,7 @@
 const {
   requireShopper, loadCart, assertVersion, graphql, failure, ShopError, formatMoney, text,
   loadOffer, applyOffer, removeOffer, offerText, hideProtectedCoupons, maskCodes, sanitizeOutput,
+  throwIfCartChanged,
   queries, constants,
 } = require('../lib/commerce.js');
 const { withAnalytics } = require('../lib/analytics.js');
@@ -165,6 +166,7 @@ const handler = async (args = {}, extra) => {
     }
     if (coupon) {
       const { errors } = await graphql(extra, queries.COUPON_MUTATION, { input: { cart_id: id, coupon_code: coupon } }, { shopper });
+      throwIfCartChanged(errors);
       if (errors.length) warnings.push(`Coupon ${coupon} was not applied: ${maskCodes(text(errors[0]?.message, 200))}`);
     }
     const accountEmail = customer?.email && !constants.PLACEHOLDER_EMAIL.test(customer.email) ? customer.email : null;

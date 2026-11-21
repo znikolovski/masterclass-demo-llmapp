@@ -194,6 +194,16 @@ async function graphql(extra, query, variables = {}, { shopper, orderExpect, tim
   return { data: body.data || {}, errors };
 }
 
+/**
+ * Commerce refuses a coupon write whose cart changed concurrently (CART_CHANGED, revision guard).
+ * Surfaces it as a typed cart_changed conflict; callers attach the refreshed cart and never retry.
+ */
+function throwIfCartChanged(errors) {
+  if (errors.some((e) => e?.extensions?.code === 'CART_CHANGED')) {
+    throw new ShopError(409, 'cart_changed', 'Your cart changed while this was being updated (perhaps on the WKND website), so nothing was changed. Review the updated cart and try again.');
+  }
+}
+
 /** Throws when a request returned GraphQL errors (the message is safe to show shoppers). */
 function ensureNoErrors(errors, fallback = 'The shop could not complete that request.') {
   if (!errors.length) return;
@@ -835,6 +845,7 @@ async function applyOffer(extra, shopper, cartId, appliedCoupons, expectedVersio
   const { cart: latest } = await loadCart(extra, shopper);
   if (latest.version !== expectedVersion) throw offerNotApplied('CART_CHANGED', undefined, { cart: latest });
   const { errors } = await graphql(extra, COUPON_MUTATION, { input: { cart_id: cartId, coupon_code: claimed.code } }, { shopper });
+  throwIfCartChanged(errors);
   if (errors.length) {
     const reason = text(errors[0]?.extensions?.code, 60);
     throw offerNotApplied(reason || 'UNAVAILABLE', OFFER_ERROR_CODES.includes(reason) ? text(errors[0].message, 200) : undefined);
@@ -858,6 +869,7 @@ async function removeOffer(extra, shopper, cartId, appliedCoupons) {
   const codes = appliedCoupons.filter((c) => PROTECTED_COUPON_CODES.includes(c) || c === dynamic);
   if (!codes.length) return { removed: false, codes };
   const { errors } = await graphql(extra, REMOVE_COUPONS_MUTATION, { input: { cart_id: cartId, coupon_codes: codes } }, { shopper });
+  throwIfCartChanged(errors);
   if (errors.length) {
     throw new ShopError(409, 'offer_not_removed', 'The welcome-back offer could not be removed. Review your current cart and try again.', { protectedCodes: codes });
   }
@@ -903,6 +915,7 @@ module.exports = {
   requireShopper,
   graphql,
   ensureNoErrors,
+  throwIfCartChanged,
   searchProducts,
   getProducts,
   refineProduct,
