@@ -481,11 +481,40 @@ shop does not sell (tents, stoves, maps) stays a plain checklist item.
    | `get-shop-cart` | none |
    | `add-shop-cart-items` | `sku` string (required); `quantity` integer 1–20 (default 1); `options` object of option → value, e.g. `{ "colour": "Deep Ocean", "size": "M" }`; `cart_version` string. One product per call (the UI has no array type) |
    | `update-shop-cart-items` | `line_id` string (required); `quantity` integer 0–20 (required; 0 removes the line); `cart_version` string. One line per call |
-   | `prepare-shop-checkout` | `cart_version`, `email`, `saved_address_id`, `shipping_method` (`standard`, `express`, `international`), `coupon_code` strings; `shipping_address` object `{ firstname, lastname, street (string or 1–2 strings), city, region, postcode, country_code, telephone }` |
+   | `prepare-shop-checkout` | `cart_version`, `email`, `saved_address_id`, `shipping_method` (`standard`, `express`, `international`), `coupon_code` strings; `shipping_address` object `{ firstname, lastname, street (string or 1–2 strings), city, region, postcode, country_code, telephone }`; `apply_offer` boolean (see Welcome-back offer) |
    | `place-shop-demo-order` | `cart_version` string, `expected_grand_total` number, `confirm` boolean — all required |
 
 Backend prerequisite: deploy `wknd-commerce` with `WKND_MCP_DELEGATION_ISSUER` (this MCP resource)
 and `WKND_MCP_DELEGATION_SECRET`. Without them every cart tool returns a sign-in error.
+
+### Welcome-back offer (cart recovery)
+
+`get-shop-cart` and `prepare-shop-checkout` return `structuredContent.offer` when Commerce
+(`wkndRecoveryOffer`) reports the shopper's welcome-back offer as `ELIGIBLE` or `CLAIMED`, it saves
+more than the cart's current discount, and it is not already applied; otherwise `offer` is `null`.
+Commerce decides eligibility and the saving; the app only displays it. The offer carries `saving`,
+`current_saving`, `percent_off`, `max_discount`, `expires_at` and `replaces_code` (the shopper's own
+code it would replace). Eligibility reasons are never requested and the protected promotion code
+(`RECOVER10`) never reaches the model or widgets: it is dropped from `cart.coupons` (the cart says
+`offer_applied: true` instead) and masked in error text.
+
+`prepare-shop-checkout` with `apply_offer: true` claims the offer and applies its code server-side
+(replacing the current code), after the usual `cart_version` check; the total changes, so the
+shopper reviews again before ordering. `apply_offer: false` removes an applied welcome-back offer.
+`apply_offer` and `coupon_code` cannot be combined. A refusal is an explicit `offer_not_applied`
+error (`subcode` = Commerce status, `NOT_BENEFICIAL`, `ALREADY_APPLIED`, or the Commerce error code,
+whose message is shown as-is). `place-shop-demo-order` reports an offer that stopped being valid as
+`offer_invalid` with the current cart. Email consent is never changed here; shoppers manage it at
+`https://wknd-adventures.run.place/account`.
+
+LLM Apps UI (both Stage and Production, then redeploy): on `prepare-shop-checkout` add property
+`apply_offer`, type **Boolean**, not required, description:
+
+> Set to true only when the shopper explicitly asks to apply the WKND welcome-back offer shown with
+> their cart; set to false only to remove that offer. The shop decides eligibility and the saving.
+> Pass the latest cart_version. Do not combine with coupon_code.
+
+No other metadata, auth, CSP or widget URL changes.
 
 ### Checkout scope
 
@@ -494,7 +523,7 @@ separate, gated workstream: OpenAI's plugin guidelines require external merchant
 native (Instant) Checkout is limited to approved partners using the Agentic Commerce checkout and
 delegated-payment specs. Do not reuse this flow for real payments.
 
-Tests: `npx jest test/lib/commerce.test.js test/actions/*shop* test/actions/build-gear-checklist.test.js`.
+Tests: `npx jest test/lib/commerce.test.js test/actions/*shop* test/actions/recovery-offer.test.js test/actions/build-gear-checklist.test.js`.
 
 ## Adobe Analytics for MCP actions
 

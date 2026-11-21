@@ -37,6 +37,13 @@ const AU_STATES = {
   WA: 'Western Australia',
 };
 const PLACEHOLDER_EMAIL = /@users\.wknd\.example$/i;
+// Protected Commerce promotion codes (the welcome-back recovery offer, Commerce POLICY_V1.code).
+// They are entitlement-bound and never shown to the model or widgets; the offer's own code is
+// hidden too when Commerce returns a different one.
+const PROTECTED_COUPON_CODES = ['RECOVER10'];
+const OFFER_READ_TIMEOUT_MS = 10000;
+// Commerce eligibility errors whose messages are shown to shoppers as-is.
+const OFFER_ERROR_CODES = ['COUPON_SHOPPER_INELIGIBLE', 'RECOVERY_ALREADY_REDEEMED', 'COUPON_ELIGIBILITY_UNAVAILABLE'];
 
 class ShopError extends Error {
   constructor(status, code, message, details) {
@@ -69,7 +76,9 @@ function failure(error, extra = {}) {
     content: [{ type: 'text', text: e.message }],
     structuredContent: {
       view: 'error',
-      error: { status: e.status, code: e.code, message: e.message },
+      error: {
+        status: e.status, code: e.code, message: e.message, ...(e.details?.subcode ? { subcode: e.details.subcode } : {}),
+      },
       ...(e.details?.cart ? { cart: e.details.cart } : {}),
       ...extra,
     },
@@ -530,6 +539,13 @@ const EMAIL_MUTATION = `mutation ShopEmail($input: SetGuestEmailOnCartInput!) {
 const COUPON_MUTATION = `mutation ShopCoupon($input: ApplyCouponToCartInput!) {
   applyCouponToCart(input: $input) { cart { id } }
 }`;
+const REMOVE_COUPON_MUTATION = `mutation ShopRemoveCoupon($input: RemoveCouponFromCartInput!) {
+  removeCouponFromCart(input: $input) { cart { id } }
+}`;
+// No `reason`: ineligibility reasons describe shopper behaviour and are never forwarded.
+const OFFER_FIELDS = 'status coupon_code percent_off max_discount { value currency } expires_at saving { value currency } current_saving { value currency }';
+const OFFER_QUERY = `query ShopOffer($cartId: String!) { wkndRecoveryOffer(cart_id: $cartId) { ${OFFER_FIELDS} } }`;
+const CLAIM_OFFER_MUTATION = `mutation ShopClaimOffer($cartId: String!) { claimWkndRecoveryOffer(cart_id: $cartId) { ${OFFER_FIELDS} } }`;
 const SHIPPING_ADDRESS_MUTATION = `mutation ShopShipTo($input: SetShippingAddressesOnCartInput!) {
   setShippingAddressesOnCart(input: $input) { cart { id } }
 }`;
@@ -645,7 +661,30 @@ function normalizeCart(cart) {
   summary.version = cartVersion(summary);
   summary.missing = missingForOrder(summary);
   summary.ready = summary.missing.length === 0;
+  hideProtectedCoupons(summary, PROTECTED_COUPON_CODES);
   return summary;
+}
+
+/**
+ * Removes protected promotion codes from a normalized cart (after its version was computed, so
+ * applying or removing one still changes cart_version). `offer_applied` tells widgets and the
+ * model that the welcome-back offer is on the cart without revealing its code.
+ */
+function hideProtectedCoupons(cart, codes) {
+  const hidden = new Set(codes.filter(Boolean).map((c) => String(c).toUpperCase()));
+  const visible = cart.coupons.filter((c) => !hidden.has(c.toUpperCase()));
+  const applied = visible.length !== cart.coupons.length;
+  cart.coupons = visible;
+  cart.offer_applied = Boolean(cart.offer_applied || applied);
+  return cart;
+}
+
+/** Replaces any protected promotion code in shopper-facing text. */
+function maskCodes(value, codes = []) {
+  return [...PROTECTED_COUPON_CODES, ...codes].filter(Boolean).reduce(
+    (out, code) => out.replace(new RegExp(String(code).replace(/[^A-Za-z0-9]/g, '\\$&'), 'gi'), 'welcome-back offer'),
+    String(value ?? ''),
+  );
 }
 
 /**
@@ -680,7 +719,117 @@ function missingForOrder(cart) {
 async function loadCart(extra, shopper) {
   const { data, errors } = await graphql(extra, CART_QUERY, {}, { shopper });
   ensureNoErrors(errors);
-  return { id: data.customerCart?.id, cart: normalizeCart(data.customerCart) };
+  const appliedCoupons = (data.customerCart?.applied_coupons || []).map((c) => text(c?.code, 40).toUpperCase()).filter(Boolean);
+  // `appliedCoupons` (raw, may include protected codes) is for handler decisions only, never output.
+  return { id: data.customerCart?.id, cart: normalizeCart(data.customerCart), appliedCoupons };
+}
+
+/* ---------------- welcome-back (cart recovery) offer ---------------- */
+
+const OFFER_COPY = {
+  SIGN_IN_REQUIRED: 'Sign in with your WKND account to use the welcome-back offer.',
+  ALREADY_APPLIED: 'The welcome-back offer is already applied to this cart.',
+  NOT_BENEFICIAL: 'The welcome-back offer would not save more than the discount already on this cart, so it was not applied.',
+  REDEEMED: 'This offer has already been used.',
+  DEFAULT: 'This welcome-back offer isn’t available for this cart.',
+};
+
+/**
+ * Commerce decides eligibility and savings; this only applies the agreed display rule:
+ * ELIGIBLE/CLAIMED, saving > current saving, and its code not already on the cart.
+ * @returns {{ status: string, code: string|null, show: boolean, why: string|null, offer: object|null }}
+ */
+function offerDecision(raw, appliedCoupons = []) {
+  const status = text(raw?.status, 30) || 'UNAVAILABLE';
+  const code = text(raw?.coupon_code, 40).toUpperCase() || null;
+  const saving = money(raw?.saving);
+  const current = money(raw?.current_saving) || { value: 0, currency: saving?.currency || 'AUD' };
+  let why = null;
+  if (!['ELIGIBLE', 'CLAIMED'].includes(status) || !code) why = status === 'ELIGIBLE' || status === 'CLAIMED' ? 'UNAVAILABLE' : status;
+  else if (appliedCoupons.includes(code)) why = 'ALREADY_APPLIED';
+  else if (!saving || !(saving.value > current.value)) why = 'NOT_BENEFICIAL';
+  const replaces = appliedCoupons.find((c) => c !== code && !PROTECTED_COUPON_CODES.includes(c)) || null;
+  const offer = why ? null : {
+    kind: 'welcome_back',
+    status,
+    saving,
+    current_saving: current,
+    percent_off: num(raw.percent_off),
+    max_discount: money(raw.max_discount),
+    expires_at: text(raw.expires_at, 40) || null,
+    replaces_code: replaces,
+  };
+  return {
+    status, code, show: !why, why, offer,
+  };
+}
+
+/** The offer to display, or null. A failed lookup never blocks the cart. */
+async function loadOffer(extra, shopper, cartId, appliedCoupons) {
+  if (!cartId) return offerDecision(null, appliedCoupons);
+  try {
+    const { data, errors } = await graphql(extra, OFFER_QUERY, { cartId }, { shopper, timeoutMs: OFFER_READ_TIMEOUT_MS });
+    if (errors.length) return offerDecision(null, appliedCoupons);
+    return offerDecision(data.wkndRecoveryOffer, appliedCoupons);
+  } catch (e) {
+    if (e instanceof ShopError && e.code === 'shop_authentication_failed') throw e;
+    return offerDecision(null, appliedCoupons);
+  }
+}
+
+function offerNotApplied(subcode, message) {
+  return new ShopError(409, 'offer_not_applied', message || OFFER_COPY[subcode] || OFFER_COPY.DEFAULT, { subcode });
+}
+
+/**
+ * Claims the welcome-back offer and applies its code (replacing any current code) server-side;
+ * the code never leaves this function. Throws offer_not_applied when Commerce says no.
+ */
+async function applyOffer(extra, shopper, cartId, appliedCoupons) {
+  const read = await graphql(extra, OFFER_QUERY, { cartId }, { shopper });
+  if (read.errors.length) throw offerNotApplied('UNAVAILABLE');
+  const decision = offerDecision(read.data.wkndRecoveryOffer, appliedCoupons);
+  if (!decision.show) throw offerNotApplied(decision.why);
+  let { code } = decision;
+  if (decision.status !== 'CLAIMED') {
+    const claim = await graphql(extra, CLAIM_OFFER_MUTATION, { cartId }, { shopper });
+    const claimed = claim.errors.length ? null : claim.data.claimWkndRecoveryOffer;
+    const status = text(claimed?.status, 30);
+    if (status !== 'CLAIMED' || !text(claimed?.coupon_code, 40)) throw offerNotApplied(claim.errors.length ? 'UNAVAILABLE' : status || 'UNAVAILABLE');
+    code = text(claimed.coupon_code, 40).toUpperCase();
+  }
+  const { errors } = await graphql(extra, COUPON_MUTATION, { input: { cart_id: cartId, coupon_code: code } }, { shopper });
+  if (errors.length) {
+    const reason = text(errors[0]?.extensions?.code, 60);
+    throw offerNotApplied(reason || 'UNAVAILABLE', OFFER_ERROR_CODES.includes(reason) ? text(errors[0].message, 200) : undefined);
+  }
+  return { code, saving: decision.offer.saving };
+}
+
+/** Removes the welcome-back offer from the cart (only when one is applied). */
+async function removeOffer(extra, shopper, cartId, appliedCoupons) {
+  if (!appliedCoupons.some((c) => PROTECTED_COUPON_CODES.includes(c))) return false;
+  const { errors } = await graphql(extra, REMOVE_COUPON_MUTATION, { input: { cart_id: cartId } }, { shopper });
+  if (errors.length) throw new ShopError(400, 'shop_request_rejected', 'The welcome-back offer could not be removed. Please try again.');
+  return true;
+}
+
+const formatDate = (iso) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : new Intl.DateTimeFormat('en-AU', { day: 'numeric', month: 'short', year: 'numeric' }).format(d);
+};
+
+/** Model-facing description of a displayable offer (no code, no eligibility reasons). */
+function offerText(offer) {
+  if (!offer) return '';
+  const ends = formatDate(offer.expires_at);
+  const terms = [
+    offer.percent_off !== null ? `${offer.percent_off}% off gear` : null,
+    offer.max_discount ? `up to ${formatMoney(offer.max_discount)}` : null,
+    ends ? `ends ${ends}` : null,
+    'one use per account',
+  ].filter(Boolean).join(', ');
+  return `A WKND welcome-back offer saves ${formatMoney(offer.saving)} on this cart (${terms}).${offer.replaces_code ? ` It replaces code ${offer.replaces_code}.` : ''} Apply it only if the shopper asks: call prepare_shop_checkout with apply_offer: true and this cart_version.`;
 }
 
 function assertVersion(cart, expected) {
@@ -694,7 +843,7 @@ const formatMoney = (m) => (m ? `${m.currency === 'AUD' ? 'A$' : `${m.currency} 
 function cartText(cart) {
   if (!cart.lines.length) return 'Your WKND cart is empty.';
   const lines = cart.lines.map((l) => `- ${l.quantity} × ${l.name}${l.options.length ? ` (${l.options.map((o) => o.value).join(' / ')})` : ''} [line ${l.line_id}] — ${formatMoney(l.row_total)}${l.available ? '' : ` — ${l.message || 'unavailable'}`}`);
-  return `Your WKND cart (${cart.item_count} item${cart.item_count === 1 ? '' : 's'}, version ${cart.version}):\n${lines.join('\n')}\nTotal: ${formatMoney(cart.totals.grand_total)} incl. GST${cart.totals.shipping ? '' : ' (before shipping)'}.`;
+  return `Your WKND cart (${cart.item_count} item${cart.item_count === 1 ? '' : 's'}, version ${cart.version}):\n${lines.join('\n')}\n${cart.offer_applied ? 'The welcome-back offer is applied.\n' : ''}Total: ${formatMoney(cart.totals.grand_total)} incl. GST${cart.totals.shipping ? '' : ' (before shipping)'}.`;
 }
 
 module.exports = {
@@ -715,6 +864,13 @@ module.exports = {
   normalizeProduct,
   normalizeCart,
   loadCart,
+  loadOffer,
+  applyOffer,
+  removeOffer,
+  offerDecision,
+  offerText,
+  hideProtectedCoupons,
+  maskCodes,
   assertVersion,
   cartText,
   formatMoney,
@@ -726,6 +882,9 @@ module.exports = {
     UPDATE_MUTATION,
     EMAIL_MUTATION,
     COUPON_MUTATION,
+    REMOVE_COUPON_MUTATION,
+    OFFER_QUERY,
+    CLAIM_OFFER_MUTATION,
     SHIPPING_ADDRESS_MUTATION,
     BILLING_ADDRESS_MUTATION,
     SHIPPING_METHOD_MUTATION,
@@ -735,5 +894,6 @@ module.exports = {
   },
   constants: {
     MCP_RESOURCE, IDENTITY_ISSUER, SHOP_SCOPE, DELEGATION_AUDIENCE, DEFAULT_GRAPHQL_URL, PAYMENT_METHOD, DEMO_NOTICE, AU_STATES, PLACEHOLDER_EMAIL, SITE_HOST,
+    PROTECTED_COUPON_CODES, OFFER_ERROR_CODES,
   },
 };

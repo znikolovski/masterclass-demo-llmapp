@@ -2,7 +2,7 @@
 // nothing ships. Requires the exact cart version and total the shopper confirmed, so a cart that
 // changed after review (another tab, the website, a retry) is never ordered by mistake.
 const {
-  requireShopper, loadCart, assertVersion, graphql, failure, ShopError, formatMoney, text, num,
+  requireShopper, loadCart, assertVersion, graphql, failure, ShopError, formatMoney, text, num, maskCodes,
   queries, constants,
 } = require('../lib/commerce.js');
 const { withAnalytics } = require('../lib/analytics.js');
@@ -79,8 +79,15 @@ const handler = async (args = {}, extra) => {
       if (orderError?.code === 'CART_NOT_ACTIVE') {
         throw new ShopError(409, 'cart_already_ordered', 'This cart was already ordered (perhaps in another window). Check your WKND orders.');
       }
-      const message = text(orderError?.message || errors[0]?.message, 300) || 'The shop could not place the order.';
+      const message = maskCodes(text(orderError?.message || errors[0]?.message, 300)) || 'The shop could not place the order.';
       const current = await loadCart(extra, shopper).then((r) => r.cart).catch(() => undefined);
+      // The welcome-back offer (or another promotion) is no longer valid for this shopper or cart.
+      const offerCode = text(errors[0]?.extensions?.code, 60);
+      if (constants.OFFER_ERROR_CODES.includes(offerCode) || /coupon|offer/i.test(message)) {
+        throw new ShopError(409, 'offer_invalid', `${message} Remove the offer or use a different code, then review the order again.`, {
+          subcode: offerCode || undefined, ...(current ? { cart: current } : {}),
+        });
+      }
       const code = /changed/i.test(message) ? 'cart_changed' : 'order_rejected';
       throw new ShopError(409, code, message, current ? { cart: current } : undefined);
     }
