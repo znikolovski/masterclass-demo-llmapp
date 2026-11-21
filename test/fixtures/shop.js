@@ -100,6 +100,7 @@ function cart (overrides = {}) {
             discounts: []
         },
         applied_coupons: [],
+        wknd_cart_version: 'v1',
         shipping_addresses: [],
         billing_address: null,
         selected_payment_method: { code: '', title: '' },
@@ -122,15 +123,32 @@ function readyCart (overrides = {}) {
     })
 }
 
+// Schema introspection answer: Commerce publishes the reviewed-version offer contract.
+const REVIEWED_CONTRACT = () => ({
+    data: {
+        m: { fields: [{ name: 'applyWkndRecoveryOffer' }, { name: 'removeWkndRecoveryOffer' }, { name: 'applyCouponToCart' }] },
+        c: { fields: [{ name: 'id' }, { name: 'wknd_cart_version' }] }
+    }
+})
+// Schema without it (Commerce before the reviewed-version contract).
+const LEGACY_CONTRACT = () => ({ data: { m: { fields: [{ name: 'applyCouponToCart' }] }, c: { fields: [{ name: 'id' }] } } })
+
 /**
  * Installs a fetch mock answering storefront GraphQL operations from `routes`
  * ({ ShopCart: (variables, request) => body, ... }). Returns the jest mock.
+ * The capability introspection (ShopCapabilities) answers REVIEWED_CONTRACT unless a route is
+ * given, and is not recorded in `calls` (so call sequences show only shop operations).
  */
 function fakeCommerce (routes) {
+    require('../../actions/lib/commerce.js').resetCapabilityCache()
     const calls = []
     global.fetch = jest.fn(async (url, init) => {
         const { query, variables } = JSON.parse(init.body)
         const operation = (query.match(/^\s*(?:query|mutation)\s+(\w+)/) || [])[1]
+        if (operation === 'ShopCapabilities') {
+            const body = await (routes.ShopCapabilities || REVIEWED_CONTRACT)(variables, init)
+            return { ok: true, status: 200, json: async () => body }
+        }
         calls.push({ operation, variables, headers: init.headers, url })
         const route = routes[operation]
         if (!route) throw new Error(`unexpected operation ${operation}`)
@@ -142,5 +160,5 @@ function fakeCommerce (routes) {
 }
 
 module.exports = {
-    MCP_RESOURCE, ISSUER, SECRET, SUB, DM, shopper, money, jacketView, lampView, cartItem, cart, readyCart, fakeCommerce
+    MCP_RESOURCE, ISSUER, SECRET, SUB, DM, shopper, money, jacketView, lampView, cartItem, cart, readyCart, fakeCommerce, REVIEWED_CONTRACT, LEGACY_CONTRACT
 }

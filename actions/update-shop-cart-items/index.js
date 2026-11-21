@@ -4,6 +4,7 @@
 const {
   requireShopper, loadCart, assertVersion, graphql, normalizeCart, failure, ShopError, cartText,
   text, queries, constants, sanitizeOutput,
+  shopCartDocs,
 } = require('../lib/commerce.js');
 const { withAnalytics } = require('../lib/analytics.js');
 
@@ -33,7 +34,7 @@ const handler = async (args = {}, extra) => {
       throw new ShopError(404, 'line_not_found', 'That item is no longer in your cart. Review the updated cart.', { cart: before });
     }
 
-    const { data, errors } = await graphql(extra, queries.UPDATE_MUTATION, {
+    const { data, errors } = await graphql(extra, (await shopCartDocs(extra)).UPDATE_MUTATION, {
       input: { cart_id: id, cart_items: parsed },
     }, { shopper });
     const result = data.updateCartItems;

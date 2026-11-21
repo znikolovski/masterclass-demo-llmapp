@@ -4,6 +4,7 @@ const {
   requireShopper, loadCart, assertVersion, getProducts, resolveOptions, attachSoldOutVariants,
   isSoldOutCombination, comboTitle, graphql, normalizeCart, failure, ShopError, cartText, text, queries, sanitizeOutput,
   constants,
+  shopCartDocs,
 } = require('../lib/commerce.js');
 const { withAnalytics } = require('../lib/analytics.js');
 
@@ -58,7 +59,7 @@ const handler = async (args = {}, extra) => {
 
     const { id, cart: before } = await loadCart(extra, shopper);
     assertVersion(before, args.cart_version);
-    const { data, errors } = await graphql(extra, queries.ADD_MUTATION, { cartId: id, items: cartItems }, { shopper });
+    const { data, errors } = await graphql(extra, (await shopCartDocs(extra)).ADD_MUTATION, { cartId: id, items: cartItems }, { shopper });
     const result = data.addProductsToCart;
     if (!result?.cart) {
       throw new ShopError(400, 'shop_request_rejected', text(errors[0]?.message, 300) || 'The shop could not add those items.');

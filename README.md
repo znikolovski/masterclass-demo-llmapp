@@ -504,26 +504,39 @@ cart says `offer_applied: true`) and masked in every string of every shop tool r
 shopper-entered codes are shown as usual. `cart_version` still hashes the raw codes.
 
 Offer actions on `prepare-shop-checkout` (both optional Booleans; omitted or `false` is a no-op and
-never blocks an ordinary `coupon_code`):
+never blocks an ordinary `coupon_code`). They use only Commerce's reviewed-version contract
+(`Cart.wknd_cart_version`, `applyWkndRecoveryOffer` and `removeWkndRecoveryOffer`,
+wknd-commerce#7):
 
-- `apply_offer: true` requires the reviewed `cart_version`, re-reads the offer, claims it (the
-  claim's own response must be `CLAIMED` and still beneficial), re-reads the cart and refuses if it
-  changed since review (`CART_CHANGED`), then applies the code server-side (replacing the current
-  code). The total changes, so the shopper reviews again before ordering. This is NOT a
-  no-downgrade guarantee: Commerce replaces the stored coupon unconditionally and its comparison is
-  a read, so a change after the last cart read and before the apply is not prevented here (an
-  atomic guard has to live in Commerce).
-- `remove_offer: true` requires the reviewed `cart_version` and removes only an applied protected
-  welcome-back code (`removeCouponsFromCart` with that code). Ordinary codes, entitlements and
-  redemptions are untouched. With no welcome-back offer applied it changes nothing and says so; a
-  failed removal is an explicit `offer_not_removed` error with the current cart.
+- When that contract is published (checked by live schema introspection, cached for 60 seconds per
+  endpoint; never assumed), every cart read and cart mutation selects the opaque server token and
+  hashes it into `cart_version`. The shopper's reviewed 16-hex `cart_version` therefore pins exactly
+  one backend cart revision, and the token recorded with that reviewed cart is what is sent as
+  `expected_cart_version`. The token is never returned to the model or widgets.
+- `apply_offer: true` requires the reviewed `cart_version`, then calls
+  `applyWkndRecoveryOffer(cart_id, expected_cart_version)`. Commerce claims the offer, checks it saves
+  strictly more than the current promotion and writes only if the cart is still in the reviewed
+  revision (`CART_CHANGED` otherwise; nothing written). `APPLIED` changes the total (review again);
+  `ALREADY_APPLIED` is an honest no-op.
+- `remove_offer: true` requires the reviewed `cart_version`, then calls
+  `removeWkndRecoveryOffer(cart_id, expected_cart_version)`: only the protected welcome-back coupon is
+  removed (`REMOVED`); with none applied it changes nothing and says so (`NOT_APPLIED`).
+  Entitlements, redemptions and ordinary codes are untouched.
+- A Commerce `CART_CHANGED` on any coupon write is a `cart_changed` conflict with the refreshed
+  cart; it is never retried.
+- When the contract is not published (or the check fails), both actions fail closed
+  (`REVIEWED_VERSION_UNAVAILABLE`), no generic coupon mutation is used for the protected code, and
+  the offer is shown only as the non-actionable `UNAVAILABLE` state.
 - `apply_offer: true` with `remove_offer: true` → `conflicting_offer_actions`; either `true` with
   `coupon_code` → `conflicting_discounts`; either `true` without `cart_version` →
   `cart_version_required`. All are rejected before calling Commerce.
 
-A refusal to apply is an explicit `offer_not_applied` error (`subcode` = Commerce status,
-`NOT_BENEFICIAL`, `ALREADY_APPLIED`, `CART_CHANGED`, `UNAVAILABLE`, or the Commerce error code,
-whose code-free message is shown as-is). `place-shop-demo-order` reports an offer that stopped being
+Release order: this needs wknd-commerce#7 deployed in the target environment first; until then the
+offer is display-only (`UNAVAILABLE`) and everything else works as before.
+
+A refusal to apply is an explicit `offer_not_applied` error (`subcode` = `NOT_BENEFICIAL` for
+`OFFER_NOT_BETTER`, `RECOVERY_OFFER_UNAVAILABLE`, `REVIEWED_VERSION_UNAVAILABLE`, or the Commerce
+eligibility code, whose code-free message is shown as-is). `place-shop-demo-order` reports an offer that stopped being
 valid as `offer_invalid` with the current cart. Email consent is never changed here; shoppers manage
 it at `https://wknd-adventures.run.place/account`.
 

@@ -8,9 +8,11 @@ const { withAnalytics } = require('../lib/analytics.js');
 const handler = async (_args, extra) => {
   try {
     const shopper = requireShopper(extra);
-    const { id, cart, appliedCoupons } = await loadCart(extra, shopper);
+    const {
+      id, cart, appliedCoupons, reviewed,
+    } = await loadCart(extra, shopper);
     const decision = cart.lines.length
-      ? await loadOffer(extra, shopper, id, appliedCoupons)
+      ? await loadOffer(extra, shopper, id, appliedCoupons, reviewed)
       : { code: null, offer: null };
     hideProtectedCoupons(cart, [decision.code]);
     const note = offerText(decision.offer);

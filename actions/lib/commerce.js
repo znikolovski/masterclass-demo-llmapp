@@ -533,30 +533,81 @@ const CART_FIELDS = `
   billing_address { firstname lastname }
   selected_payment_method { code title }`;
 
-const CART_QUERY = `query ShopCart { customerCart { ${CART_FIELDS} } }`;
-const ADD_MUTATION = `mutation ShopAdd($cartId: String!, $items: [CartItemInput!]!) {
+/*
+ * Cart documents. When Commerce publishes the reviewed-version contract (Cart.wknd_cart_version,
+ * applyWkndRecoveryOffer, removeWkndRecoveryOffer), every cart selection includes the opaque server
+ * token so it is part of cart_version: the shopper's reviewed cart_version then pins exactly one
+ * backend cart revision. Selecting an unpublished field would fail validation, so the variant is
+ * chosen by a live schema check (reviewedOfferSupport), never assumed.
+ */
+function cartDocs(reviewed) {
+  const fields = reviewed ? `${CART_FIELDS}\n  wknd_cart_version` : CART_FIELDS;
+  return {
+    reviewed,
+    CART_QUERY: `query ShopCart { customerCart { ${fields} } }`,
+    ADD_MUTATION: `mutation ShopAdd($cartId: String!, $items: [CartItemInput!]!) {
   addProductsToCart(cartId: $cartId, cartItems: $items) {
-    cart { ${CART_FIELDS} }
+    cart { ${fields} }
     user_errors { code message }
   }
+}`,
+    UPDATE_MUTATION: `mutation ShopUpdate($input: UpdateCartItemsInput!) {
+  updateCartItems(input: $input) { cart { ${fields} } errors { code message } }
+}`,
+  };
+}
+const { CART_QUERY, ADD_MUTATION, UPDATE_MUTATION } = cartDocs(false);
+const CAPABILITIES_QUERY = `query ShopCapabilities {
+  m: __type(name: "Mutation") { fields { name } }
+  c: __type(name: "Cart") { fields { name } }
 }`;
-const UPDATE_MUTATION = `mutation ShopUpdate($input: UpdateCartItemsInput!) {
-  updateCartItems(input: $input) { cart { ${CART_FIELDS} } errors { code message } }
+const APPLY_OFFER_MUTATION = `mutation ShopApplyOffer($cartId: String!, $expected: String!) {
+  applyWkndRecoveryOffer(cart_id: $cartId, expected_cart_version: $expected) { outcome }
 }`;
+const REMOVE_OFFER_MUTATION = `mutation ShopRemoveOffer($cartId: String!, $expected: String!) {
+  removeWkndRecoveryOffer(cart_id: $cartId, expected_cart_version: $expected) { outcome }
+}`;
+const CAPABILITY_TTL_MS = 60000;
+const capabilityCache = new Map();
+
+/**
+ * Whether this Commerce endpoint publishes the reviewed-version offer contract, from a live
+ * introspection (cached briefly per endpoint). Any failure → false (fail closed; not cached).
+ */
+async function reviewedOfferSupport(extra) {
+  const url = graphqlUrl(extra);
+  const hit = capabilityCache.get(url);
+  if (hit && hit.until > Date.now()) return hit.value;
+  try {
+    const { data, errors } = await graphql(extra, CAPABILITIES_QUERY, {}, { timeoutMs: OFFER_READ_TIMEOUT_MS });
+    if (errors.length) return false;
+    const mutations = new Set((data.m?.fields || []).map((f) => f?.name));
+    const cartFields = new Set((data.c?.fields || []).map((f) => f?.name));
+    const value = mutations.has('applyWkndRecoveryOffer') && mutations.has('removeWkndRecoveryOffer') && cartFields.has('wknd_cart_version');
+    capabilityCache.set(url, { value, until: Date.now() + CAPABILITY_TTL_MS });
+    return value;
+  } catch {
+    return false;
+  }
+}
+
+/** Cart documents for this endpoint (with the server token when the contract is published). */
+async function shopCartDocs(extra) {
+  return cartDocs(await reviewedOfferSupport(extra));
+}
+
+function resetCapabilityCache() {
+  capabilityCache.clear();
+}
 const EMAIL_MUTATION = `mutation ShopEmail($input: SetGuestEmailOnCartInput!) {
   setGuestEmailOnCart(input: $input) { cart { id } }
 }`;
 const COUPON_MUTATION = `mutation ShopCoupon($input: ApplyCouponToCartInput!) {
   applyCouponToCart(input: $input) { cart { id } }
 }`;
-// Removes only the listed codes (never an empty list: that would clear every code).
-const REMOVE_COUPONS_MUTATION = `mutation ShopRemoveCoupons($input: RemoveCouponsFromCartInput!) {
-  removeCouponsFromCart(input: $input) { cart { id } }
-}`;
 // No `reason`: ineligibility reasons describe shopper behaviour and are never forwarded.
 const OFFER_FIELDS = 'status coupon_code percent_off max_discount { value currency } expires_at saving { value currency } current_saving { value currency }';
 const OFFER_QUERY = `query ShopOffer($cartId: String!) { wkndRecoveryOffer(cart_id: $cartId) { ${OFFER_FIELDS} } }`;
-const CLAIM_OFFER_MUTATION = `mutation ShopClaimOffer($cartId: String!) { claimWkndRecoveryOffer(cart_id: $cartId) { ${OFFER_FIELDS} } }`;
 const SHIPPING_ADDRESS_MUTATION = `mutation ShopShipTo($input: SetShippingAddressesOnCartInput!) {
   setShippingAddressesOnCart(input: $input) { cart { id } }
 }`;
@@ -669,7 +720,8 @@ function normalizeCart(cart) {
       payment_method: cart.selected_payment_method?.code === PAYMENT_METHOD ? PAYMENT_METHOD : null,
     },
   };
-  summary.version = cartVersion(summary);
+  // The server token (when published) is hashed in, never returned.
+  summary.version = cartVersion(summary, text(cart.wknd_cart_version, 120) || null);
   summary.missing = missingForOrder(summary);
   summary.ready = summary.missing.length === 0;
   hideProtectedCoupons(summary, PROTECTED_COUPON_CODES);
@@ -715,8 +767,9 @@ function sanitizeOutput(value, codes = []) {
  * Fingerprint of everything that changes what an order would contain or cost. Writes may pass the
  * version they were based on; a mismatch means the cart changed elsewhere (another tab, the website).
  */
-function cartVersion(cart) {
+function cartVersion(cart, serverToken = null) {
   const basis = JSON.stringify([
+    serverToken,
     cart.lines.map((l) => [l.line_id, l.sku, l.quantity, l.row_total?.value]),
     cart.coupons,
     cart.checkout.email,
@@ -741,11 +794,19 @@ function missingForOrder(cart) {
 }
 
 async function loadCart(extra, shopper) {
-  const { data, errors } = await graphql(extra, CART_QUERY, {}, { shopper });
+  const docs = await shopCartDocs(extra);
+  const { data, errors } = await graphql(extra, docs.CART_QUERY, {}, { shopper });
   ensureNoErrors(errors);
   const appliedCoupons = (data.customerCart?.applied_coupons || []).map((c) => text(c?.code, 40).toUpperCase()).filter(Boolean);
-  // `appliedCoupons` (raw, may include protected codes) is for handler decisions only, never output.
-  return { id: data.customerCart?.id, cart: normalizeCart(data.customerCart), appliedCoupons };
+  // `appliedCoupons` (raw, may include protected codes) and `serverVersion` (the opaque token
+  // bound into cart.version) are for handler decisions only, never output.
+  return {
+    id: data.customerCart?.id,
+    cart: normalizeCart(data.customerCart),
+    appliedCoupons,
+    serverVersion: docs.reviewed ? text(data.customerCart?.wknd_cart_version, 120) || null : null,
+    reviewed: docs.reviewed,
+  };
 }
 
 /* ---------------- welcome-back (cart recovery) offer ---------------- */
@@ -803,8 +864,10 @@ function offerDecision(raw, appliedCoupons = []) {
 }
 
 /** The offer to show with the cart. A failed lookup returns the explicit UNAVAILABLE state. */
-async function loadOffer(extra, shopper, cartId, appliedCoupons) {
+async function loadOffer(extra, shopper, cartId, appliedCoupons, reviewed = true) {
   if (!cartId) return offerDecision(null, appliedCoupons);
+  // Without the reviewed-version contract the offer can't be applied safely: never actionable.
+  if (!reviewed) return offerDecision(null, appliedCoupons);
   try {
     const { data, errors } = await graphql(extra, OFFER_QUERY, { cartId }, { shopper, timeoutMs: OFFER_READ_TIMEOUT_MS });
     if (errors.length) return offerDecision(null, appliedCoupons);
@@ -819,61 +882,46 @@ function offerNotApplied(subcode, message, details = {}) {
   return new ShopError(409, 'offer_not_applied', message || OFFER_COPY[subcode] || OFFER_COPY.DEFAULT, { ...details, subcode });
 }
 
+const REVIEWED_UNAVAILABLE = 'The welcome-back offer can’t be changed here right now. Please try again later.';
+
 /**
- * Claims the welcome-back offer and applies its code (replacing any current code) server-side;
- * the code never leaves this function. Throws offer_not_applied when Commerce says no.
- *
- * NOT a no-downgrade guarantee: Commerce's applyCouponToCart replaces the stored coupon
- * unconditionally and its saving comparison is a read. This only narrows the window: (1) the
- * shopper's reviewed cart_version is required and checked, (2) the claim's own fresh comparison
- * must pass, and (3) the cart is re-read right before the apply and a change since the reviewed
- * `expectedVersion` is refused. A change after that last read is not prevented here; an atomic
- * guard has to live in Commerce.
+ * Applies the welcome-back offer with Commerce's reviewed-version mutation: Commerce claims it,
+ * checks it saves strictly more than the current promotion, and writes only if the cart is still
+ * at `serverVersion` (the token bound into the shopper's reviewed cart_version). The protected
+ * code never leaves Commerce. Fails closed when the contract isn't published.
+ * @returns {Promise<{ outcome: 'APPLIED'|'ALREADY_APPLIED' }>}
  */
-async function applyOffer(extra, shopper, cartId, appliedCoupons, expectedVersion) {
-  const read = await graphql(extra, OFFER_QUERY, { cartId }, { shopper });
-  const first = offerDecision(read.errors.length ? null : read.data.wkndRecoveryOffer, appliedCoupons);
-  if (!first.show) throw offerNotApplied(first.why);
-  let claimed = first;
-  if (first.status !== 'CLAIMED') {
-    const claim = await graphql(extra, CLAIM_OFFER_MUTATION, { cartId }, { shopper });
-    claimed = offerDecision(claim.errors.length ? null : claim.data.claimWkndRecoveryOffer, appliedCoupons);
-    if (claimed.status !== 'CLAIMED' || !claimed.show) {
-      throw offerNotApplied(claimed.status === 'CLAIMED' ? claimed.why : claimed.status);
-    }
-  }
-  const { cart: latest } = await loadCart(extra, shopper);
-  if (latest.version !== expectedVersion) throw offerNotApplied('CART_CHANGED', undefined, { cart: latest });
-  const { errors } = await graphql(extra, COUPON_MUTATION, { input: { cart_id: cartId, coupon_code: claimed.code } }, { shopper });
+async function applyOffer(extra, shopper, cartId, serverVersion, reviewed) {
+  if (!reviewed || !serverVersion) throw offerNotApplied('REVIEWED_VERSION_UNAVAILABLE', REVIEWED_UNAVAILABLE);
+  const { data, errors } = await graphql(extra, APPLY_OFFER_MUTATION, { cartId, expected: serverVersion }, { shopper });
   throwIfCartChanged(errors);
   if (errors.length) {
-    const reason = text(errors[0]?.extensions?.code, 60);
-    throw offerNotApplied(reason || 'UNAVAILABLE', OFFER_ERROR_CODES.includes(reason) ? text(errors[0].message, 200) : undefined);
+    const code = text(errors[0]?.extensions?.code, 60);
+    if (code === 'OFFER_NOT_BETTER') throw offerNotApplied('NOT_BENEFICIAL');
+    if (OFFER_ERROR_CODES.includes(code)) throw offerNotApplied(code, text(errors[0].message, 200));
+    throw offerNotApplied(code || 'UNAVAILABLE', OFFER_COPY.DEFAULT);
   }
-  return { code: claimed.code, saving: claimed.offer.saving };
+  const outcome = data.applyWkndRecoveryOffer?.outcome;
+  if (!['APPLIED', 'ALREADY_APPLIED'].includes(outcome)) throw offerNotApplied('UNAVAILABLE', OFFER_COPY.DEFAULT);
+  return { outcome };
 }
 
 /**
- * Removes only an applied protected welcome-back code (the pinned code, or the offer's own code
- * when Commerce reports it). Ordinary codes, entitlements and redemptions are untouched.
- * @returns {Promise<{ removed: boolean, codes: string[] }>} removed=false when none was applied
+ * Removes only the welcome-back offer's protected coupon with Commerce's reviewed-version
+ * mutation (any other coupon is left alone; entitlements and redemptions untouched).
+ * @returns {Promise<{ removed: boolean }>} removed=false when none was applied (NOT_APPLIED)
  */
-async function removeOffer(extra, shopper, cartId, appliedCoupons) {
-  let dynamic = null;
-  try {
-    const read = await graphql(extra, OFFER_QUERY, { cartId }, { shopper, timeoutMs: OFFER_READ_TIMEOUT_MS });
-    dynamic = read.errors.length ? null : text(read.data.wkndRecoveryOffer?.coupon_code, 40).toUpperCase() || null;
-  } catch (e) {
-    if (e instanceof ShopError && e.code === 'shop_authentication_failed') throw e;
+async function removeOffer(extra, shopper, cartId, serverVersion, reviewed) {
+  if (!reviewed || !serverVersion) {
+    throw new ShopError(409, 'offer_not_removed', REVIEWED_UNAVAILABLE, { subcode: 'REVIEWED_VERSION_UNAVAILABLE' });
   }
-  const codes = appliedCoupons.filter((c) => PROTECTED_COUPON_CODES.includes(c) || c === dynamic);
-  if (!codes.length) return { removed: false, codes };
-  const { errors } = await graphql(extra, REMOVE_COUPONS_MUTATION, { input: { cart_id: cartId, coupon_codes: codes } }, { shopper });
+  const { data, errors } = await graphql(extra, REMOVE_OFFER_MUTATION, { cartId, expected: serverVersion }, { shopper });
   throwIfCartChanged(errors);
-  if (errors.length) {
-    throw new ShopError(409, 'offer_not_removed', 'The welcome-back offer could not be removed. Review your current cart and try again.', { protectedCodes: codes });
+  const outcome = errors.length ? null : data.removeWkndRecoveryOffer?.outcome;
+  if (!['REMOVED', 'NOT_APPLIED'].includes(outcome)) {
+    throw new ShopError(409, 'offer_not_removed', 'The welcome-back offer could not be removed. Review your current cart and try again.');
   }
-  return { removed: true, codes };
+  return { removed: outcome === 'REMOVED' };
 }
 
 const formatDate = (iso) => {
@@ -916,6 +964,9 @@ module.exports = {
   graphql,
   ensureNoErrors,
   throwIfCartChanged,
+  reviewedOfferSupport,
+  shopCartDocs,
+  resetCapabilityCache,
   searchProducts,
   getProducts,
   refineProduct,
@@ -947,9 +998,10 @@ module.exports = {
     UPDATE_MUTATION,
     EMAIL_MUTATION,
     COUPON_MUTATION,
-    REMOVE_COUPONS_MUTATION,
     OFFER_QUERY,
-    CLAIM_OFFER_MUTATION,
+    APPLY_OFFER_MUTATION,
+    REMOVE_OFFER_MUTATION,
+    CAPABILITIES_QUERY,
     SHIPPING_ADDRESS_MUTATION,
     BILLING_ADDRESS_MUTATION,
     SHIPPING_METHOD_MUTATION,

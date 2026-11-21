@@ -5,7 +5,7 @@ const getCart = require('../../actions/get-shop-cart/index.js')
 const prepare = require('../../actions/prepare-shop-checkout/index.js')
 const place = require('../../actions/place-shop-demo-order/index.js')
 const { offerDecision, normalizeCart } = require('../../actions/lib/commerce.js')
-const { shopper, cart, readyCart, money, fakeCommerce } = require('../fixtures/shop.js')
+const { shopper, cart, readyCart, money, fakeCommerce, LEGACY_CONTRACT } = require('../fixtures/shop.js')
 
 const OFFER_LABEL = 'Welcome back — 10% off your gear (max $25)'
 
@@ -174,122 +174,143 @@ describe('welcome-back offer', () => {
         })
     })
 
-    describe('prepare-shop-checkout apply_offer', () => {
+    describe('prepare-shop-checkout offer actions (reviewed-version contract)', () => {
+        // A fake Commerce with the reviewed-version mutations and a revision token (CAS).
         function routes (state, overrides = {}) {
+            state.rev = state.rev || 1
+            state.cart = { ...state.cart, wknd_cart_version: `v${state.rev}` }
+            const write = (cart) => { state.rev += 1; state.cart = { ...cart, wknd_cart_version: `v${state.rev}` } }
+            const codes = () => (state.cart.applied_coupons || []).map((c) => c.code)
+            const changed = { errors: [{ message: 'Your cart changed since it was reviewed. Review the cart and try again.', extensions: { category: 'graphql-input', code: 'CART_CHANGED' } }] }
             return {
                 ShopCart: () => ({ data: { customerCart: state.cart } }),
                 ShopCustomer: () => ({ data: { customer: { email: 'sam@example.com', addresses: [] } } }),
                 ShopOffer: () => ({ data: { wkndRecoveryOffer: state.offer } }),
-                ShopClaimOffer: () => {
-                    state.offer = { ...state.offer, status: 'CLAIMED' }
-                    return { data: { claimWkndRecoveryOffer: state.offer } }
+                ShopApplyOffer: (v) => {
+                    if (v.expected !== state.cart.wknd_cart_version) return changed
+                    if (state.verdict) return { errors: [{ message: state.verdict.message, extensions: { category: 'graphql-input', code: state.verdict.code } }] }
+                    if (codes().includes('RECOVER10')) return { data: { applyWkndRecoveryOffer: { outcome: 'ALREADY_APPLIED' } } }
+                    write(withCoupon('RECOVER10', 25, readyCart))
+                    return { data: { applyWkndRecoveryOffer: { outcome: 'APPLIED' } } }
                 },
-                ShopCoupon: (v) => {
-                    state.cart = withCoupon(v.input.coupon_code, 25, readyCart)
-                    return ok('applyCouponToCart')()
+                ShopRemoveOffer: (v) => {
+                    if (v.expected !== state.cart.wknd_cart_version) return changed
+                    if (!codes().includes('RECOVER10')) return { data: { removeWkndRecoveryOffer: { outcome: 'NOT_APPLIED' } } }
+                    write(readyCart())
+                    return { data: { removeWkndRecoveryOffer: { outcome: 'REMOVED' } } }
                 },
-                ShopRemoveCoupons: (v) => {
-                    const remove = v.input.coupon_codes.map((c) => c.toUpperCase())
-                    const kept = (state.cart.applied_coupons || []).filter((c) => !remove.includes(c.code))
-                    state.cart = kept.length ? withCoupon(kept[0].code, 20, readyCart) : readyCart()
-                    return ok('removeCouponsFromCart')()
-                },
+                ShopCoupon: (v) => { write(withCoupon(v.input.coupon_code, 20, readyCart)); return ok('applyCouponToCart')() },
                 ShopPay: ok('setPaymentMethodOnCart'),
                 ...overrides
             }
         }
+        const reviewedVersion = async (state) => {
+            const r = await getCart({}, shopper())
+            global.fetch.calls.length = 0
+            return r.structuredContent.cart.version
+        }
+        const ops = () => global.fetch.calls.map((c) => c.operation)
 
-        test('claims then applies the offer server-side, replacing the current code', async () => {
+        test('applies through applyWkndRecoveryOffer with the server token bound to the reviewed cart_version', async () => {
             const state = { cart: withCoupon('TRAILREADY', 20, readyCart), offer: offer() }
             fakeCommerce(routes(state))
-            const version = (await (async () => {
-                const r = await getCart({}, shopper())
-                return r.structuredContent.cart.version
-            })())
-            global.fetch.calls.length = 0
+            const version = await reviewedVersion(state)
             const result = await prepare({ cart_version: version, apply_offer: true }, shopper())
-            expect(global.fetch.calls.map((c) => c.operation)).toEqual(['ShopCart', 'ShopCustomer', 'ShopOffer', 'ShopClaimOffer', 'ShopCart', 'ShopCoupon', 'ShopPay', 'ShopCart', 'ShopOffer'])
-            expect(global.fetch.calls.find((c) => c.operation === 'ShopCoupon').variables.input).toEqual({ cart_id: 'masked-cart-id', coupon_code: 'RECOVER10' })
+            expect(ops()).toEqual(['ShopCart', 'ShopCustomer', 'ShopApplyOffer', 'ShopPay', 'ShopCart', 'ShopOffer'])
+            expect(global.fetch.calls.find((c) => c.operation === 'ShopApplyOffer').variables).toEqual({ cartId: 'masked-cart-id', expected: 'v1' })
+            expect(ops()).not.toContain('ShopCoupon')
             expect(result.isError).toBeUndefined()
             expect(result.structuredContent).toMatchObject({ view: 'checkout', offer: null, cart: { coupons: [], offer_applied: true } })
             expect(result.structuredContent.cart.version).not.toBe(version)
-            expect(result.structuredContent.warnings[0]).toMatch(/Welcome-back offer applied \(saves A\$25\.00\)/)
+            expect(result.structuredContent.warnings[0]).toBe('Welcome-back offer applied. The total changed, so review it again before ordering.')
+            expectNoCode(result)
+            expect(JSON.stringify(result)).not.toMatch(/wknd_cart_version|"v\d+"/)
+        })
+
+        test('the server token is part of cart_version: same visible cart, new token → stale', async () => {
+            const state = { cart: withCoupon('TRAILREADY', 20, readyCart), offer: offer() }
+            fakeCommerce(routes(state))
+            const version = await reviewedVersion(state)
+            state.rev = 7
+            state.cart = { ...state.cart, wknd_cart_version: 'v7' }
+            const result = await prepare({ cart_version: version, apply_offer: true }, shopper())
+            expect(result.structuredContent.error.code).toBe('cart_changed')
+            expect(ops()).toEqual(['ShopCart'])
+        })
+
+        test('a cart written between the reviewed read and the apply is refused by Commerce (CAS) and never retried', async () => {
+            const state = { cart: withCoupon('TRAILREADY', 20, readyCart), offer: offer() }
+            const base = routes(state)
+            fakeCommerce({
+                ...base,
+                ShopCustomer: () => {
+                    // the website applies a better code after the reviewed read, before the apply
+                    state.rev += 1
+                    state.cart = { ...withCoupon('WKND10', 60, readyCart), wknd_cart_version: `v${state.rev}` }
+                    return base.ShopCustomer()
+                }
+            })
+            const version = await reviewedVersion(state)
+            const result = await prepare({ cart_version: version, apply_offer: true }, shopper())
+            expect(result).toMatchObject({ isError: true, structuredContent: { error: { status: 409, code: 'cart_changed' }, cart: { coupons: ['WKND10'] } } })
+            expect(ops().filter((o) => o === 'ShopApplyOffer')).toHaveLength(1)
+            expect(state.cart.applied_coupons).toEqual([{ code: 'WKND10' }])
+        })
+
+        test('ALREADY_APPLIED is an honest no-op', async () => {
+            const state = { cart: withCoupon('RECOVER10', 25, readyCart), offer: offer({ status: 'CLAIMED' }) }
+            fakeCommerce(routes(state))
+            const version = await reviewedVersion(state)
+            const result = await prepare({ cart_version: version, apply_offer: true }, shopper())
+            expect(result.isError).toBeUndefined()
+            expect(result.structuredContent.warnings[0]).toBe('The welcome-back offer is already applied to this cart, so nothing changed.')
+            expect(result.structuredContent.cart.version).toBe(version)
+        })
+
+        test.each([
+            ['OFFER_NOT_BETTER', 'Your cart already has an equal or better saving.', 'NOT_BENEFICIAL', /would not save more/],
+            ['RECOVERY_OFFER_UNAVAILABLE', 'This offer isn\'t available for this cart.', 'RECOVERY_OFFER_UNAVAILABLE', /^This welcome-back offer isn’t available for this cart\.$/],
+            ['COUPON_SHOPPER_INELIGIBLE', 'Coupon is not available for this shopper.', 'COUPON_SHOPPER_INELIGIBLE', /^Coupon is not available for this shopper\.$/],
+            ['RECOVERY_ALREADY_REDEEMED', 'This offer has already been used.', 'RECOVERY_ALREADY_REDEEMED', /^This offer has already been used\.$/],
+            ['COUPON_ELIGIBILITY_UNAVAILABLE', 'Coupon eligibility cannot currently be verified.', 'COUPON_ELIGIBILITY_UNAVAILABLE', /^Coupon eligibility cannot currently be verified\.$/]
+        ])('Commerce %s → explicit offer_not_applied, cart unchanged', async (code, message, subcode, text) => {
+            const state = { cart: withCoupon('TRAILREADY', 20, readyCart), offer: offer(), verdict: { code, message } }
+            fakeCommerce(routes(state))
+            const version = await reviewedVersion(state)
+            const result = await prepare({ cart_version: version, apply_offer: true }, shopper())
+            expect(result).toMatchObject({ isError: true, structuredContent: { error: { status: 409, code: 'offer_not_applied', subcode } } })
+            expect(result.structuredContent.error.message).toMatch(text)
+            expect(result.structuredContent.cart).toMatchObject({ version, coupons: ['TRAILREADY'], offer_applied: false })
             expectNoCode(result)
         })
 
-        test('an already claimed offer is applied without claiming again', async () => {
-            const state = { cart: readyCart(), offer: offer({ status: 'CLAIMED', current_saving: money(0) }) }
-            fakeCommerce(routes(state))
-            const result = await prepare({ apply_offer: true, cart_version: versionOf(state) }, shopper())
-            expect(global.fetch.calls.map((c) => c.operation)).not.toContain('ShopClaimOffer')
-            expect(result.structuredContent.cart.offer_applied).toBe(true)
-        })
-
         test.each([
-            ['INELIGIBLE', offer({ status: 'INELIGIBLE', coupon_code: null, saving: null }), 'This welcome-back offer isn’t available for this cart.'],
-            ['REDEEMED', offer({ status: 'REDEEMED', coupon_code: null, saving: null }), 'This offer has already been used.'],
-            ['NOT_BENEFICIAL', offer({ saving: money(15), current_saving: money(20) }), /would not save more/]
-        ])('refuses explicitly when %s, without claiming', async (subcode, value, message) => {
-            const state = { cart: withCoupon('WKND10', 20, readyCart), offer: value }
-            fakeCommerce(routes(state))
-            const result = await prepare({ apply_offer: true, cart_version: versionOf(state) }, shopper())
-            expect(result).toMatchObject({ isError: true, structuredContent: { error: { status: 409, code: 'offer_not_applied', subcode } } })
-            expect(result.structuredContent.error.message).toEqual(expect.stringMatching(message))
-            expect(result.structuredContent.cart).toMatchObject({ coupons: ['WKND10'] })
-            expect(global.fetch.calls.map((c) => c.operation)).not.toContain('ShopClaimOffer')
-            expect(global.fetch.calls.map((c) => c.operation)).not.toContain('ShopCoupon')
-        })
-
-        test.each([
-            ['denied (INELIGIBLE)', offer({ status: 'INELIGIBLE', coupon_code: null, saving: null }), 'INELIGIBLE'],
-            ['already redeemed', offer({ status: 'REDEEMED', coupon_code: null, saving: null }), 'REDEEMED'],
-            ['still ELIGIBLE (not reserved)', offer(), 'ELIGIBLE'],
-            ['claimed but no longer beneficial', offer({ status: 'CLAIMED', saving: money(15), current_saving: money(20) }), 'NOT_BENEFICIAL'],
-            ['claimed with a malformed saving', offer({ status: 'CLAIMED', saving: { value: 25, currency: 'USD' } }), 'UNAVAILABLE']
-        ])('a claim that comes back %s is not applied and leaves the cart unchanged', async (_label, claim, subcode) => {
-            const state = { cart: withCoupon('TRAILREADY', 20, readyCart), offer: offer() }
-            fakeCommerce(routes(state, { ShopClaimOffer: () => ({ data: { claimWkndRecoveryOffer: claim } }) }))
-            const before = (await getCart({}, shopper())).structuredContent.cart
+            ['apply_offer', { apply_offer: true }, 'offer_not_applied'],
+            ['remove_offer', { remove_offer: true }, 'offer_not_removed']
+        ])('without the published contract, %s fails closed: no generic coupon write, offer not actionable', async (_flag, args, code) => {
+            const state = { cart: withCoupon('RECOVER10', 25, readyCart), offer: offer({ status: 'CLAIMED' }) }
+            const r = routes(state, { ShopCapabilities: LEGACY_CONTRACT })
+            delete state.cart.wknd_cart_version
+            fakeCommerce(r)
+            const before = await getCart({}, shopper())
+            expect(before.structuredContent.offer).toMatchObject({ status: 'UNAVAILABLE' })
+            expect(ops()).not.toContain('ShopOffer')
+            const query = JSON.parse(global.fetch.mock.calls.find(([, init]) => /ShopCart/.test(init.body))[1].body).query
+            expect(query).not.toMatch(/wknd_cart_version/)
             global.fetch.calls.length = 0
-            const result = await prepare({ apply_offer: true, cart_version: before.version }, shopper())
-            expect(result.structuredContent.error).toMatchObject({ code: 'offer_not_applied', subcode })
-            expect(result.structuredContent.cart).toMatchObject({ version: before.version, coupons: ['TRAILREADY'], offer_applied: false })
-            expect(global.fetch.calls.map((c) => c.operation)).not.toContain('ShopCoupon')
+            const result = await prepare({ ...args, cart_version: before.structuredContent.cart.version }, shopper())
+            expect(result.structuredContent.error).toMatchObject({ status: 409, code, subcode: 'REVIEWED_VERSION_UNAVAILABLE' })
+            expect(ops()).not.toEqual(expect.arrayContaining(['ShopApplyOffer']))
+            expect(ops()).not.toContain('ShopRemoveOffer')
+            expect(ops()).not.toContain('ShopCoupon')
+            expectNoCode(result)
         })
 
-        test('a claim error is not applied', async () => {
+        test('a failed capability check fails closed (not cached as supported)', async () => {
             const state = { cart: readyCart(), offer: offer() }
-            fakeCommerce(routes(state, { ShopClaimOffer: () => ({ errors: [{ message: 'nope', extensions: { category: 'graphql' } }] }) }))
-            const result = await prepare({ apply_offer: true, cart_version: versionOf(state) }, shopper())
-            expect(result.structuredContent.error).toMatchObject({ code: 'offer_not_applied', subcode: 'UNAVAILABLE' })
-            expect(global.fetch.calls.map((c) => c.operation)).not.toContain('ShopCoupon')
-        })
-
-        test('a cart that changes between the claim and the apply is not applied (race)', async () => {
-            const state = { cart: withCoupon('TRAILREADY', 20, readyCart), offer: offer() }
-            fakeCommerce(routes(state, {
-                ShopClaimOffer: () => {
-                    // the website changes the cart (a better code) after the review, mid-apply
-                    state.cart = withCoupon('WKND10', 60, readyCart)
-                    return { data: { claimWkndRecoveryOffer: offer({ status: 'CLAIMED' }) } }
-                }
-            }))
-            const before = (await getCart({}, shopper())).structuredContent.cart
-            global.fetch.calls.length = 0
-            const result = await prepare({ apply_offer: true, cart_version: before.version }, shopper())
-            expect(result.structuredContent.error).toMatchObject({ code: 'offer_not_applied', subcode: 'CART_CHANGED' })
-            expect(result.structuredContent.cart).toMatchObject({ coupons: ['WKND10'] })
-            expect(global.fetch.calls.map((c) => c.operation)).not.toContain('ShopCoupon')
-        })
-
-        test('the claim\'s own fresh comparison decides, not the earlier read', async () => {
-            const state = { cart: withCoupon('TRAILREADY', 20, readyCart), offer: offer({ saving: money(25), current_saving: money(20) }) }
-            fakeCommerce(routes(state, {
-                ShopClaimOffer: () => ({ data: { claimWkndRecoveryOffer: offer({ status: 'CLAIMED', saving: money(22), current_saving: money(20) }) } })
-            }))
-            const result = await prepare({ apply_offer: true, cart_version: versionOf(state) }, shopper())
-            expect(result.isError).toBeUndefined()
-            expect(result.structuredContent.warnings[0]).toMatch(/saves A\$22\.00/)
+            fakeCommerce(routes(state, { ShopCapabilities: () => ({ errors: [{ message: 'introspection disabled' }] }) }))
+            const before = await getCart({}, shopper())
+            expect(before.structuredContent.offer).toMatchObject({ status: 'UNAVAILABLE' })
         })
 
         test('an ordinary entered code is echoed in its warning, not redacted', async () => {
@@ -297,20 +318,6 @@ describe('welcome-back offer', () => {
             fakeCommerce(routes(state, { ShopCoupon: () => ({ errors: [{ message: 'The coupon code "BOGUS1" is not valid.', extensions: { code: 'COUPON_NOT_FOUND' } }] }) }))
             const result = await prepare({ coupon_code: 'bogus1' }, shopper())
             expect(result.structuredContent.warnings[0]).toBe('Coupon BOGUS1 was not applied: The coupon code "BOGUS1" is not valid.')
-        })
-
-        test.each([
-            ['COUPON_SHOPPER_INELIGIBLE', 'Coupon is not available for this shopper.'],
-            ['RECOVERY_ALREADY_REDEEMED', 'This offer has already been used.'],
-            ['COUPON_ELIGIBILITY_UNAVAILABLE', 'Coupon eligibility cannot currently be verified.']
-        ])('shows Commerce %s verbatim', async (code, message) => {
-            const state = { cart: readyCart(), offer: offer() }
-            fakeCommerce(routes(state, {
-                ShopCoupon: () => ({ data: { applyCouponToCart: null }, errors: [{ message, extensions: { category: 'graphql-input', code } }] })
-            }))
-            const result = await prepare({ apply_offer: true, cart_version: versionOf(state) }, shopper())
-            expect(result.structuredContent.error).toMatchObject({ code: 'offer_not_applied', subcode: code, message })
-            expectNoCode(result)
         })
 
         test('apply_offer and coupon_code together are rejected before calling Commerce', async () => {
@@ -323,7 +330,7 @@ describe('welcome-back offer', () => {
         test.each([
             ['apply_offer', { apply_offer: true }],
             ['remove_offer', { remove_offer: true }]
-        ])('%s: true requires the reviewed cart_version before anything is read, claimed or removed', async (_flag, args) => {
+        ])('%s: true requires the reviewed cart_version before anything is read or written', async (_flag, args) => {
             global.fetch = jest.fn()
             const result = await prepare(args, shopper())
             expect(result.structuredContent.error).toMatchObject({ status: 400, code: 'cart_version_required' })
@@ -358,7 +365,7 @@ describe('welcome-back offer', () => {
             fakeCommerce(routes(state))
             const result = await prepare({ ...args, cart_version: '0000000000000000' }, shopper())
             expect(result.structuredContent.error.code).toBe('cart_changed')
-            expect(global.fetch.calls.map((c) => c.operation)).toEqual(['ShopCart'])
+            expect(ops()).toEqual(['ShopCart'])
         })
 
         test('apply_offer: true and remove_offer: true together are rejected', async () => {
@@ -380,15 +387,14 @@ describe('welcome-back offer', () => {
             ['apply_offer: false', { apply_offer: false }],
             ['remove_offer: false', { remove_offer: false }],
             ['both false', { apply_offer: false, remove_offer: false }]
-        ])('%s leaves an applied offer in place (no claim, apply or removal)', async (_label, flags) => {
+        ])('%s leaves an applied offer in place (no offer mutation)', async (_label, flags) => {
             const state = { cart: withCoupon('RECOVER10', 25, readyCart), offer: offer({ status: 'CLAIMED' }) }
             fakeCommerce(routes(state))
             const result = await prepare({ ...flags }, shopper())
-            const ops = global.fetch.calls.map((c) => c.operation)
             expect(result.isError).toBeUndefined()
-            expect(ops).not.toContain('ShopRemoveCoupons')
-            expect(ops).not.toContain('ShopClaimOffer')
-            expect(ops).not.toContain('ShopCoupon')
+            expect(ops()).not.toContain('ShopApplyOffer')
+            expect(ops()).not.toContain('ShopRemoveOffer')
+            expect(ops()).not.toContain('ShopCoupon')
             expect(result.structuredContent.cart.offer_applied).toBe(true)
             expectNoCode(result)
         })
@@ -396,42 +402,32 @@ describe('welcome-back offer', () => {
         test.each([
             ['apply_offer: false', { apply_offer: false }],
             ['remove_offer: false', { remove_offer: false }]
-        ])('%s does not block an ordinary coupon and never removes the offer itself', async (_label, flags) => {
+        ])('%s does not block an ordinary coupon and never touches the offer itself', async (_label, flags) => {
             const state = { cart: withCoupon('RECOVER10', 25, readyCart), offer: offer({ status: 'CLAIMED' }) }
             fakeCommerce(routes(state))
             const result = await prepare({ ...flags, coupon_code: 'trailready' }, shopper())
-            const ops = global.fetch.calls.map((c) => c.operation)
             expect(result.isError).toBeUndefined()
-            expect(ops).not.toContain('ShopRemoveCoupons')
+            expect(ops()).not.toContain('ShopRemoveOffer')
             expect(global.fetch.calls.find((c) => c.operation === 'ShopCoupon').variables.input.coupon_code).toBe('TRAILREADY')
         })
 
-        test('remove_offer: true removes only the protected code', async () => {
-            const state = { cart: cart({ ...readyCart(), applied_coupons: [{ code: 'RECOVER10' }] }), offer: offer({ status: 'CLAIMED' }) }
+        test('remove_offer: true removes through removeWkndRecoveryOffer with the reviewed server token', async () => {
+            const state = { cart: withCoupon('RECOVER10', 25, readyCart), offer: offer({ status: 'CLAIMED' }) }
             fakeCommerce(routes(state))
-            const result = await prepare({ remove_offer: true, cart_version: versionOf(state) }, shopper())
-            const removal = global.fetch.calls.find((c) => c.operation === 'ShopRemoveCoupons')
-            expect(removal.variables.input).toEqual({ cart_id: 'masked-cart-id', coupon_codes: ['RECOVER10'] })
-            expect(global.fetch.calls.map((c) => c.operation)).not.toContain('ShopClaimOffer')
-            expect(result.structuredContent.warnings[0]).toMatch(/^Welcome-back offer removed\./)
+            const version = await reviewedVersion(state)
+            const result = await prepare({ remove_offer: true, cart_version: version }, shopper())
+            expect(global.fetch.calls.find((c) => c.operation === 'ShopRemoveOffer').variables).toEqual({ cartId: 'masked-cart-id', expected: 'v1' })
+            expect(ops()).not.toContain('ShopCoupon')
+            expect(result.structuredContent.warnings[0]).toBe('Welcome-back offer removed. The total changed, so review it again before ordering.')
             expect(result.structuredContent.cart).toMatchObject({ offer_applied: false })
             expectNoCode(result)
         })
 
-        test('remove_offer: true removes a dynamic protected code reported by the offer', async () => {
-            const state = { cart: cart({ ...readyCart(), applied_coupons: [{ code: 'WB-7Q2X' }] }), offer: offer({ status: 'CLAIMED', coupon_code: 'WB-7Q2X' }) }
-            fakeCommerce(routes(state))
-            const result = await prepare({ remove_offer: true, cart_version: versionOf(state) }, shopper())
-            expect(global.fetch.calls.find((c) => c.operation === 'ShopRemoveCoupons').variables.input.coupon_codes).toEqual(['WB-7Q2X'])
-            expect(JSON.stringify(result)).not.toMatch(/WB-7Q2X/)
-        })
-
-        test('remove_offer: true with only an ordinary code applied changes nothing and says so', async () => {
+        test('remove_offer: true with only an ordinary code applied changes nothing and says so (NOT_APPLIED)', async () => {
             const state = { cart: withCoupon('WKND10', 20, readyCart), offer: offer() }
             fakeCommerce(routes(state))
-            const version = versionOf(state)
+            const version = await reviewedVersion(state)
             const result = await prepare({ remove_offer: true, cart_version: version }, shopper())
-            expect(global.fetch.calls.map((c) => c.operation)).not.toContain('ShopRemoveCoupons')
             expect(result.structuredContent.warnings).toEqual(['No welcome-back offer is applied to this cart, so nothing changed.'])
             expect(result.structuredContent.cart).toMatchObject({ coupons: ['WKND10'], version })
         })
@@ -439,36 +435,39 @@ describe('welcome-back offer', () => {
         test('a repeated remove_offer is honest about the unchanged cart', async () => {
             const state = { cart: withCoupon('RECOVER10', 25, readyCart), offer: offer({ status: 'CLAIMED' }) }
             fakeCommerce(routes(state))
-            const first = await prepare({ remove_offer: true, cart_version: versionOf(state) }, shopper())
+            const first = await prepare({ remove_offer: true, cart_version: await reviewedVersion(state) }, shopper())
             expect(first.structuredContent.warnings[0]).toMatch(/^Welcome-back offer removed\./)
             const second = await prepare({ remove_offer: true, cart_version: first.structuredContent.cart.version }, shopper())
             expect(second.isError).toBeUndefined()
             expect(second.structuredContent.warnings).toEqual(['No welcome-back offer is applied to this cart, so nothing changed.'])
             expect(second.structuredContent.cart.version).toBe(first.structuredContent.cart.version)
-            expect(global.fetch.calls.filter((c) => c.operation === 'ShopRemoveCoupons')).toHaveLength(1)
         })
 
-        const CHANGED = () => ({ errors: [{ message: 'Your cart changed while this was being updated. Review the cart and try again.', extensions: { category: 'graphql-input', code: 'CART_CHANGED' } }] })
-
         test.each([
-            ['apply_offer', { apply_offer: true }, () => ({ cart: withCoupon('TRAILREADY', 20, readyCart), offer: offer() }), { ShopCoupon: CHANGED }],
-            ['remove_offer', { remove_offer: true }, () => ({ cart: withCoupon('RECOVER10', 25, readyCart), offer: offer({ status: 'CLAIMED' }) }), { ShopRemoveCoupons: CHANGED }],
-            ['coupon_code', { coupon_code: 'WKND10' }, () => ({ cart: readyCart(), offer: offer() }), { ShopCoupon: CHANGED }]
-        ])('a Commerce CART_CHANGED on %s is a typed cart_changed conflict with the refreshed cart, never retried', async (_label, args, init, overrides) => {
+            ['apply_offer', { apply_offer: true }, 'ShopApplyOffer', () => ({ cart: withCoupon('TRAILREADY', 20, readyCart), offer: offer() })],
+            ['remove_offer', { remove_offer: true }, 'ShopRemoveOffer', () => ({ cart: withCoupon('RECOVER10', 25, readyCart), offer: offer({ status: 'CLAIMED' }) })]
+        ])('a Commerce CART_CHANGED on %s is a typed cart_changed conflict with the refreshed cart, never retried', async (_label, args, op, init) => {
             const state = init()
-            fakeCommerce(routes(state, overrides))
-            const result = await prepare({ ...args, cart_version: versionOf(state) }, shopper())
+            const base = routes(state)
+            fakeCommerce({ ...base, [op]: () => ({ errors: [{ message: 'Your cart changed while this was being updated.', extensions: { category: 'graphql-input', code: 'CART_CHANGED' } }] }) })
+            const result = await prepare({ ...args, cart_version: await reviewedVersion(state) }, shopper())
             expect(result).toMatchObject({ isError: true, structuredContent: { error: { status: 409, code: 'cart_changed' } } })
             expect(result.structuredContent.cart).toBeDefined()
-            const writes = global.fetch.calls.filter((c) => ['ShopCoupon', 'ShopRemoveCoupons'].includes(c.operation))
-            expect(writes).toHaveLength(1)
+            expect(ops().filter((o) => o === op)).toHaveLength(1)
             expectNoCode(result)
+        })
+
+        test('a Commerce CART_CHANGED on an ordinary coupon is a typed conflict', async () => {
+            const state = { cart: readyCart(), offer: offer() }
+            fakeCommerce(routes(state, { ShopCoupon: () => ({ errors: [{ message: 'changed', extensions: { code: 'CART_CHANGED' } }] }) }))
+            const result = await prepare({ coupon_code: 'WKND10', cart_version: await reviewedVersion(state) }, shopper())
+            expect(result.structuredContent.error.code).toBe('cart_changed')
         })
 
         test('a failed removal is an explicit error with the real current cart', async () => {
             const state = { cart: withCoupon('RECOVER10', 25, readyCart), offer: offer({ status: 'CLAIMED' }) }
-            fakeCommerce(routes(state, { ShopRemoveCoupons: () => ({ errors: [{ message: 'Cannot remove RECOVER10 right now', extensions: { category: 'graphql' } }] }) }))
-            const result = await prepare({ remove_offer: true, cart_version: versionOf(state) }, shopper())
+            fakeCommerce(routes(state, { ShopRemoveOffer: () => ({ errors: [{ message: 'Cannot remove RECOVER10 right now', extensions: { category: 'graphql' } }] }) }))
+            const result = await prepare({ remove_offer: true, cart_version: await reviewedVersion(state) }, shopper())
             expect(result).toMatchObject({ isError: true, structuredContent: { error: { status: 409, code: 'offer_not_removed' }, cart: { offer_applied: true, coupons: [] } } })
             expectNoCode(result)
         })

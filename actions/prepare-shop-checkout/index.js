@@ -135,7 +135,9 @@ const handler = async (args = {}, extra) => {
     }
     const address = args.shipping_address === undefined ? undefined : parseAddress(args.shipping_address);
 
-    const { id, cart: before, appliedCoupons } = await loadCart(extra, shopper);
+    const {
+      id, cart: before, serverVersion, reviewed,
+    } = await loadCart(extra, shopper);
     if (!before.lines.length) throw new ShopError(400, 'cart_empty', 'Your WKND cart is empty. Add gear before checking out.', { cart: before });
     assertVersion(before, args.cart_version);
 
@@ -153,13 +155,15 @@ const handler = async (args = {}, extra) => {
       if (errors.length) throw new ShopError(400, 'shop_request_rejected', text(errors[0]?.message, 300) || 'The shop rejected that checkout detail.');
     };
 
-    const removedCodes = [];
+    // serverVersion came from the cart whose cart_version the shopper reviewed (checked above),
+    // so Commerce writes only if the cart is still in exactly that reviewed state.
     if (applyOn) {
-      const applied = await applyOffer(extra, shopper, id, appliedCoupons, args.cart_version);
-      warnings.push(`Welcome-back offer applied (saves ${formatMoney(applied.saving)}). The total changed, so review it again before ordering.`);
+      const applied = await applyOffer(extra, shopper, id, serverVersion, reviewed);
+      warnings.push(applied.outcome === 'APPLIED'
+        ? 'Welcome-back offer applied. The total changed, so review it again before ordering.'
+        : 'The welcome-back offer is already applied to this cart, so nothing changed.');
     } else if (removeOn) {
-      const result = await removeOffer(extra, shopper, id, appliedCoupons);
-      removedCodes.push(...result.codes);
+      const result = await removeOffer(extra, shopper, id, serverVersion, reviewed);
       warnings.push(result.removed
         ? 'Welcome-back offer removed. The total changed, so review it again before ordering.'
         : 'No welcome-back offer is applied to this cart, so nothing changed.');
@@ -188,8 +192,12 @@ const handler = async (args = {}, extra) => {
       await run(queries.PAYMENT_MUTATION, { cart_id: id, payment_method: { code: constants.PAYMENT_METHOD } });
     }
 
-    const { id: cartId, cart, appliedCoupons: nowApplied } = await loadCart(extra, shopper);
-    const decision = cart.lines.length ? await loadOffer(extra, shopper, cartId, nowApplied) : { code: null, offer: null };
+    const {
+      id: cartId, cart, appliedCoupons: nowApplied, reviewed: nowReviewed,
+    } = await loadCart(extra, shopper);
+    const decision = cart.lines.length
+      ? await loadOffer(extra, shopper, cartId, nowApplied, nowReviewed)
+      : { code: null, offer: null };
     hideProtectedCoupons(cart, [decision.code]);
     const note = offerText(decision.offer);
     return sanitizeOutput({
@@ -203,7 +211,7 @@ const handler = async (args = {}, extra) => {
         warnings,
         notice: constants.DEMO_NOTICE,
       },
-    }, [decision.code, ...removedCodes]);
+    }, [decision.code]);
   } catch (error) {
     // Steps already applied stay applied; show the shopper the cart as it now is.
     if (started && error instanceof ShopError && !error.details?.cart) {
