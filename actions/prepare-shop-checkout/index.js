@@ -115,13 +115,21 @@ const handler = async (args = {}, extra) => {
     if (savedId !== undefined && args.shipping_address !== undefined) {
       throw new ShopError(400, 'invalid_address', 'Use either saved_address_id or shipping_address, not both.');
     }
-    if (args.apply_offer !== undefined && typeof args.apply_offer !== 'boolean') {
-      throw new ShopError(400, 'invalid_apply_offer', 'apply_offer must be true (apply the welcome-back offer) or false (remove it).');
+    ['apply_offer', 'remove_offer'].forEach((flag) => {
+      if (args[flag] !== undefined && typeof args[flag] !== 'boolean') {
+        throw new ShopError(400, `invalid_${flag}`, `${flag} must be true or false.`);
+      }
+    });
+    // Only an active (true) offer action counts; false or omitted leaves the offer unchanged.
+    const applyOn = args.apply_offer === true;
+    const removeOn = args.remove_offer === true;
+    if (applyOn && removeOn) {
+      throw new ShopError(400, 'conflicting_offer_actions', 'Use either apply_offer or remove_offer, not both.');
     }
-    if (args.apply_offer !== undefined && coupon !== undefined) {
-      throw new ShopError(400, 'conflicting_discounts', 'Use either apply_offer or coupon_code, not both.');
+    if ((applyOn || removeOn) && coupon !== undefined) {
+      throw new ShopError(400, 'conflicting_discounts', `Use either ${applyOn ? 'apply_offer' : 'remove_offer'} or coupon_code, not both.`);
     }
-    if (args.apply_offer !== undefined && args.cart_version === undefined) {
+    if ((applyOn || removeOn) && args.cart_version === undefined) {
       throw new ShopError(400, 'cart_version_required', 'Changing the welcome-back offer needs the cart_version of the cart the shopper reviewed.');
     }
     const address = args.shipping_address === undefined ? undefined : parseAddress(args.shipping_address);
@@ -144,11 +152,16 @@ const handler = async (args = {}, extra) => {
       if (errors.length) throw new ShopError(400, 'shop_request_rejected', text(errors[0]?.message, 300) || 'The shop rejected that checkout detail.');
     };
 
-    if (args.apply_offer === true) {
+    const removedCodes = [];
+    if (applyOn) {
       const applied = await applyOffer(extra, shopper, id, appliedCoupons, args.cart_version);
       warnings.push(`Welcome-back offer applied (saves ${formatMoney(applied.saving)}). The total changed, so review it again before ordering.`);
-    } else if (args.apply_offer === false && await removeOffer(extra, shopper, id, appliedCoupons)) {
-      warnings.push('Welcome-back offer removed.');
+    } else if (removeOn) {
+      const result = await removeOffer(extra, shopper, id, appliedCoupons);
+      removedCodes.push(...result.codes);
+      warnings.push(result.removed
+        ? 'Welcome-back offer removed. The total changed, so review it again before ordering.'
+        : 'No welcome-back offer is applied to this cart, so nothing changed.');
     }
     if (coupon) {
       const { errors } = await graphql(extra, queries.COUPON_MUTATION, { input: { cart_id: id, coupon_code: coupon } }, { shopper });
@@ -188,7 +201,7 @@ const handler = async (args = {}, extra) => {
         warnings,
         notice: constants.DEMO_NOTICE,
       },
-    }, [decision.code]);
+    }, [decision.code, ...removedCodes]);
   } catch (error) {
     // Steps already applied stay applied; show the shopper the cart as it now is.
     if (started && error instanceof ShopError && !error.details?.cart) {

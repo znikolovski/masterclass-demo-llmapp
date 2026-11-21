@@ -481,7 +481,7 @@ shop does not sell (tents, stoves, maps) stays a plain checklist item.
    | `get-shop-cart` | none |
    | `add-shop-cart-items` | `sku` string (required); `quantity` integer 1–20 (default 1); `options` object of option → value, e.g. `{ "colour": "Deep Ocean", "size": "M" }`; `cart_version` string. One product per call (the UI has no array type) |
    | `update-shop-cart-items` | `line_id` string (required); `quantity` integer 0–20 (required; 0 removes the line); `cart_version` string. One line per call |
-   | `prepare-shop-checkout` | `cart_version`, `email`, `saved_address_id`, `shipping_method` (`standard`, `express`, `international`), `coupon_code` strings; `shipping_address` object `{ firstname, lastname, street (string or 1–2 strings), city, region, postcode, country_code, telephone }`; `apply_offer` boolean (see Welcome-back offer) |
+   | `prepare-shop-checkout` | `cart_version`, `email`, `saved_address_id`, `shipping_method` (`standard`, `express`, `international`), `coupon_code` strings; `shipping_address` object `{ firstname, lastname, street (string or 1–2 strings), city, region, postcode, country_code, telephone }`; `apply_offer`, `remove_offer` booleans (see Welcome-back offer) |
    | `place-shop-demo-order` | `cart_version` string, `expected_grand_total` number, `confirm` boolean — all required |
 
 Backend prerequisite: deploy `wknd-commerce` with `WKND_MCP_DELEGATION_ISSUER` (this MCP resource)
@@ -503,25 +503,40 @@ reasons are never requested. Protected promotion codes (the offer's own code, pl
 cart says `offer_applied: true`) and masked in every string of every shop tool result; ordinary
 shopper-entered codes are shown as usual. `cart_version` still hashes the raw codes.
 
-`prepare-shop-checkout` with `apply_offer: true` requires the reviewed `cart_version` (as does `false`), re-reads the offer, claims it
-(the claim's own response must be `CLAIMED` and still beneficial), re-reads the cart and refuses if
-it changed since review (`CART_CHANGED`), then applies the code server-side (replacing the current
-code); the total changes, so the shopper reviews again before ordering. This is NOT a no-downgrade
-guarantee: Commerce replaces the stored coupon unconditionally and its comparison is a read, so a
-change after the last cart read and before the apply is not prevented here (an atomic guard has to
-live in Commerce). `apply_offer: false` removes an applied welcome-back offer.
-`apply_offer` and `coupon_code` cannot be combined. A refusal is an explicit `offer_not_applied`
-error (`subcode` = Commerce status, `NOT_BENEFICIAL`, `ALREADY_APPLIED`, `CART_CHANGED`,
-`UNAVAILABLE`, or the Commerce error code, whose code-free message is shown as-is). `place-shop-demo-order` reports an offer that stopped being valid as
-`offer_invalid` with the current cart. Email consent is never changed here; shoppers manage it at
-`https://wknd-adventures.run.place/account`.
+Offer actions on `prepare-shop-checkout` (both optional Booleans; omitted or `false` is a no-op and
+never blocks an ordinary `coupon_code`):
 
-LLM Apps UI (both Stage and Production, then redeploy): on `prepare-shop-checkout` add property
-`apply_offer`, type **Boolean**, not required, description:
+- `apply_offer: true` requires the reviewed `cart_version`, re-reads the offer, claims it (the
+  claim's own response must be `CLAIMED` and still beneficial), re-reads the cart and refuses if it
+  changed since review (`CART_CHANGED`), then applies the code server-side (replacing the current
+  code). The total changes, so the shopper reviews again before ordering. This is NOT a
+  no-downgrade guarantee: Commerce replaces the stored coupon unconditionally and its comparison is
+  a read, so a change after the last cart read and before the apply is not prevented here (an
+  atomic guard has to live in Commerce).
+- `remove_offer: true` requires the reviewed `cart_version` and removes only an applied protected
+  welcome-back code (`removeCouponsFromCart` with that code). Ordinary codes, entitlements and
+  redemptions are untouched. With no welcome-back offer applied it changes nothing and says so; a
+  failed removal is an explicit `offer_not_removed` error with the current cart.
+- `apply_offer: true` with `remove_offer: true` → `conflicting_offer_actions`; either `true` with
+  `coupon_code` → `conflicting_discounts`; either `true` without `cart_version` →
+  `cart_version_required`. All are rejected before calling Commerce.
 
-> Set to true only when the shopper explicitly asks to apply the WKND welcome-back offer shown with
-> their cart; set to false only to remove that offer. The shop decides eligibility and the saving.
-> Pass the latest cart_version. Do not combine with coupon_code.
+A refusal to apply is an explicit `offer_not_applied` error (`subcode` = Commerce status,
+`NOT_BENEFICIAL`, `ALREADY_APPLIED`, `CART_CHANGED`, `UNAVAILABLE`, or the Commerce error code,
+whose code-free message is shown as-is). `place-shop-demo-order` reports an offer that stopped being
+valid as `offer_invalid` with the current cart. Email consent is never changed here; shoppers manage
+it at `https://wknd-adventures.run.place/account`.
+
+LLM Apps UI (both Stage and Production, then redeploy): on `prepare-shop-checkout` add two
+properties, each type **Boolean**, not required:
+
+- `apply_offer`, description:
+
+  > Set to true only when the shopper explicitly asks to apply the WKND welcome-back offer shown with their cart. Omit or set false to leave it unchanged. The shop decides eligibility and saving. Pass the latest cart_version. Do not combine true with remove_offer:true or coupon_code.
+
+- `remove_offer`, description:
+
+  > Set to true only when the shopper explicitly asks to remove the applied WKND welcome-back offer. Omit or set false to leave it unchanged. Pass the latest cart_version. Do not combine true with apply_offer:true or coupon_code.
 
 No other metadata, auth, CSP or widget URL changes.
 

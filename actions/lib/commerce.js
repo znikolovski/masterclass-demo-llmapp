@@ -539,8 +539,9 @@ const EMAIL_MUTATION = `mutation ShopEmail($input: SetGuestEmailOnCartInput!) {
 const COUPON_MUTATION = `mutation ShopCoupon($input: ApplyCouponToCartInput!) {
   applyCouponToCart(input: $input) { cart { id } }
 }`;
-const REMOVE_COUPON_MUTATION = `mutation ShopRemoveCoupon($input: RemoveCouponFromCartInput!) {
-  removeCouponFromCart(input: $input) { cart { id } }
+// Removes only the listed codes (never an empty list: that would clear every code).
+const REMOVE_COUPONS_MUTATION = `mutation ShopRemoveCoupons($input: RemoveCouponsFromCartInput!) {
+  removeCouponsFromCart(input: $input) { cart { id } }
 }`;
 // No `reason`: ineligibility reasons describe shopper behaviour and are never forwarded.
 const OFFER_FIELDS = 'status coupon_code percent_off max_discount { value currency } expires_at saving { value currency } current_saving { value currency }';
@@ -841,12 +842,26 @@ async function applyOffer(extra, shopper, cartId, appliedCoupons, expectedVersio
   return { code: claimed.code, saving: claimed.offer.saving };
 }
 
-/** Removes the welcome-back offer from the cart (only when one is applied). */
+/**
+ * Removes only an applied protected welcome-back code (the pinned code, or the offer's own code
+ * when Commerce reports it). Ordinary codes, entitlements and redemptions are untouched.
+ * @returns {Promise<{ removed: boolean, codes: string[] }>} removed=false when none was applied
+ */
 async function removeOffer(extra, shopper, cartId, appliedCoupons) {
-  if (!appliedCoupons.some((c) => PROTECTED_COUPON_CODES.includes(c))) return false;
-  const { errors } = await graphql(extra, REMOVE_COUPON_MUTATION, { input: { cart_id: cartId } }, { shopper });
-  if (errors.length) throw new ShopError(400, 'shop_request_rejected', 'The welcome-back offer could not be removed. Please try again.');
-  return true;
+  let dynamic = null;
+  try {
+    const read = await graphql(extra, OFFER_QUERY, { cartId }, { shopper, timeoutMs: OFFER_READ_TIMEOUT_MS });
+    dynamic = read.errors.length ? null : text(read.data.wkndRecoveryOffer?.coupon_code, 40).toUpperCase() || null;
+  } catch (e) {
+    if (e instanceof ShopError && e.code === 'shop_authentication_failed') throw e;
+  }
+  const codes = appliedCoupons.filter((c) => PROTECTED_COUPON_CODES.includes(c) || c === dynamic);
+  if (!codes.length) return { removed: false, codes };
+  const { errors } = await graphql(extra, REMOVE_COUPONS_MUTATION, { input: { cart_id: cartId, coupon_codes: codes } }, { shopper });
+  if (errors.length) {
+    throw new ShopError(409, 'offer_not_removed', 'The welcome-back offer could not be removed. Review your current cart and try again.', { protectedCodes: codes });
+  }
+  return { removed: true, codes };
 }
 
 const formatDate = (iso) => {
@@ -919,7 +934,7 @@ module.exports = {
     UPDATE_MUTATION,
     EMAIL_MUTATION,
     COUPON_MUTATION,
-    REMOVE_COUPON_MUTATION,
+    REMOVE_COUPONS_MUTATION,
     OFFER_QUERY,
     CLAIM_OFFER_MUTATION,
     SHIPPING_ADDRESS_MUTATION,
