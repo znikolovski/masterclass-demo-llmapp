@@ -3,7 +3,7 @@
 // Quantities are absolute, so repeating the same update is safe.
 const {
   requireShopper, loadCart, assertVersion, graphql, normalizeCart, failure, ShopError, cartText,
-  text, queries, constants,
+  text, queries, constants, sanitizeOutput,
 } = require('../lib/commerce.js');
 const { withAnalytics } = require('../lib/analytics.js');
 
@@ -43,12 +43,12 @@ const handler = async (args = {}, extra) => {
     const cart = normalizeCart(result.cart);
     const problems = (result.errors || []).map((e) => text(e.message, 300)).filter(Boolean);
     const note = problems.length ? `Cart updated with adjustments: ${problems.join(' ')}` : (quantity === 0 ? 'Removed from your cart.' : 'Cart updated.');
-    return {
+    return sanitizeOutput({
       content: [{ type: 'text', text: `${note}\n${cartText(cart)}` }],
       structuredContent: {
         view: 'cart', cart, message: note, warnings: problems, notice: constants.DEMO_NOTICE,
       },
-    };
+    });
   } catch (error) {
     return failure(error);
   }

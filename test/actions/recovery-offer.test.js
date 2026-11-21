@@ -71,8 +71,9 @@ describe('welcome-back offer', () => {
             ['saving equals the current discount', offer({ saving: money(20), current_saving: money(20) })],
             ['the offer was already used', offer({ status: 'REDEEMED', coupon_code: null, saving: null })],
             ['the shopper is not eligible', offer({ status: 'INELIGIBLE', coupon_code: null, saving: null })],
-            ['Commerce cannot verify eligibility', offer({ status: 'UNAVAILABLE', coupon_code: null, saving: null })]
-        ])('hides the offer when %s', async (_label, value) => {
+            ['the shopper is signed out at Commerce', offer({ status: 'SIGN_IN_REQUIRED', coupon_code: null, saving: null })],
+            ['the saving is zero', offer({ saving: money(0), current_saving: money(0) })]
+        ])('returns no offer when %s', async (_label, value) => {
             fakeCommerce({
                 ShopCart: () => ({ data: { customerCart: withCoupon('WKND10', 21) } }),
                 ShopOffer: () => ({ data: { wkndRecoveryOffer: value } })
@@ -82,14 +83,77 @@ describe('welcome-back offer', () => {
             expect(result.content[0].text).not.toMatch(/welcome-back/i)
         })
 
-        test('a failed offer lookup still returns the cart', async () => {
-            fakeCommerce({
-                ShopCart: () => ({ data: { customerCart: cart() } }),
-                ShopOffer: () => ({ errors: [{ message: 'boom', extensions: { category: 'internal' } }] })
-            })
+        const UNAVAILABLE = { kind: 'welcome_back', status: 'UNAVAILABLE', message: 'The welcome-back offer can’t be checked right now. Please try again shortly.' }
+
+        test.each([
+            ['the lookup fails', () => ({ errors: [{ message: 'boom', extensions: { category: 'internal' } }] })],
+            ['the lookup throws', () => { throw new Error('network') }],
+            ['Commerce reports UNAVAILABLE', () => ({ data: { wkndRecoveryOffer: offer({ status: 'UNAVAILABLE', coupon_code: null, saving: null, current_saving: null }) } })],
+            ['the status is unknown', () => ({ data: { wkndRecoveryOffer: offer({ status: 'SOMETHING_NEW' }) } })],
+            ['an eligible offer has no saving', () => ({ data: { wkndRecoveryOffer: offer({ saving: null }) } })],
+            ['an eligible offer has no current saving', () => ({ data: { wkndRecoveryOffer: offer({ current_saving: null }) } })],
+            ['the saving is negative', () => ({ data: { wkndRecoveryOffer: offer({ saving: money(-5) }) } })],
+            ['the saving is not a number', () => ({ data: { wkndRecoveryOffer: offer({ saving: { value: '25', currency: 'AUD' } }) } })],
+            ['the saving has no currency', () => ({ data: { wkndRecoveryOffer: offer({ saving: { value: 25 } }) } })],
+            ['the currencies differ', () => ({ data: { wkndRecoveryOffer: offer({ saving: { value: 25, currency: 'NZD' } }) } })],
+            ['an eligible offer has no code', () => ({ data: { wkndRecoveryOffer: offer({ coupon_code: null }) } })]
+        ])('keeps the cart and reports an explicit, non-actionable UNAVAILABLE when %s', async (_label, route) => {
+            fakeCommerce({ ShopCart: () => ({ data: { customerCart: withCoupon('TRAILREADY', 20) } }), ShopOffer: route })
             const result = await getCart({}, shopper())
             expect(result.isError).toBeUndefined()
-            expect(result.structuredContent).toMatchObject({ view: 'cart', offer: null, cart: { item_count: 1 } })
+            expect(result.structuredContent).toMatchObject({ view: 'cart', cart: { item_count: 1, coupons: ['TRAILREADY'] } })
+            expect(result.structuredContent.offer).toEqual(UNAVAILABLE)
+            expect(result.content[0].text).toMatch(/can’t be checked right now\. Please try again shortly\. Do not promise a welcome-back discount\./)
+            expectNoCode(result)
+        })
+
+        test('an empty cart does not look up the offer', async () => {
+            fakeCommerce({ ShopCart: () => ({ data: { customerCart: cart({ items: [] }) } }) })
+            const result = await getCart({}, shopper())
+            expect(result.structuredContent.offer).toBeNull()
+            expect(global.fetch.calls.map((c) => c.operation)).toEqual(['ShopCart'])
+        })
+
+        test.each([
+            ['expired (INELIGIBLE)', offer({ status: 'INELIGIBLE', coupon_code: null, saving: null })],
+            ['redeemed', offer({ status: 'REDEEMED', coupon_code: null, saving: null })],
+            ['unavailable', offer({ status: 'UNAVAILABLE', coupon_code: null, saving: null })]
+        ])('hides an applied RECOVER10 by the pinned fallback when the offer is %s', async (_label, value) => {
+            fakeCommerce({
+                ShopCart: () => ({ data: { customerCart: withCoupon('RECOVER10', 25) } }),
+                ShopOffer: () => ({ data: { wkndRecoveryOffer: value } })
+            })
+            const result = await getCart({}, shopper())
+            expect(result.structuredContent.cart).toMatchObject({ coupons: [], offer_applied: true })
+            expectNoCode(result)
+        })
+
+        test('hides a dynamic protected code reported by the offer, but never an ordinary entered code', async () => {
+            fakeCommerce({
+                ShopCart: () => ({ data: { customerCart: cart({ applied_coupons: [{ code: 'WB-7Q2X' }] }) } }),
+                ShopOffer: () => ({ data: { wkndRecoveryOffer: offer({ status: 'CLAIMED', coupon_code: 'WB-7Q2X' }) } })
+            })
+            const dynamic = await getCart({}, shopper())
+            expect(dynamic.structuredContent.cart).toMatchObject({ coupons: [], offer_applied: true })
+            expect(JSON.stringify(dynamic)).not.toMatch(/WB-7Q2X/)
+
+            fakeCommerce({
+                ShopCart: () => ({ data: { customerCart: withCoupon('WKND10', 21) } }),
+                ShopOffer: () => ({ data: { wkndRecoveryOffer: offer({ saving: money(19), current_saving: money(21) }) } })
+            })
+            const ordinary = await getCart({}, shopper())
+            expect(ordinary.structuredContent.cart).toMatchObject({ coupons: ['WKND10'], offer_applied: false })
+        })
+
+        test('replaces_code never names a protected code', async () => {
+            fakeCommerce({
+                ShopCart: () => ({ data: { customerCart: cart({ applied_coupons: [{ code: 'RECOVER10' }] }) } }),
+                ShopOffer: () => ({ data: { wkndRecoveryOffer: offer({ coupon_code: 'WB-NEW1' }) } })
+            })
+            const result = await getCart({}, shopper())
+            expect(result.structuredContent.offer).toMatchObject({ status: 'ELIGIBLE', replaces_code: null })
+            expectNoCode(result)
+            expect(JSON.stringify(result)).not.toMatch(/WB-NEW1/)
         })
 
         test('an applied offer is reported without its code and still changes cart_version', async () => {
@@ -138,7 +202,7 @@ describe('welcome-back offer', () => {
             })())
             global.fetch.calls.length = 0
             const result = await prepare({ cart_version: version, apply_offer: true }, shopper())
-            expect(global.fetch.calls.map((c) => c.operation)).toEqual(['ShopCart', 'ShopCustomer', 'ShopOffer', 'ShopClaimOffer', 'ShopCoupon', 'ShopPay', 'ShopCart', 'ShopOffer'])
+            expect(global.fetch.calls.map((c) => c.operation)).toEqual(['ShopCart', 'ShopCustomer', 'ShopOffer', 'ShopClaimOffer', 'ShopCart', 'ShopCoupon', 'ShopPay', 'ShopCart', 'ShopOffer'])
             expect(global.fetch.calls.find((c) => c.operation === 'ShopCoupon').variables.input).toEqual({ cart_id: 'masked-cart-id', coupon_code: 'RECOVER10' })
             expect(result.isError).toBeUndefined()
             expect(result.structuredContent).toMatchObject({ view: 'checkout', offer: null, cart: { coupons: [], offer_applied: true } })
@@ -170,14 +234,63 @@ describe('welcome-back offer', () => {
             expect(global.fetch.calls.map((c) => c.operation)).not.toContain('ShopCoupon')
         })
 
-        test('a claim that does not return CLAIMED is not applied', async () => {
+        test.each([
+            ['denied (INELIGIBLE)', offer({ status: 'INELIGIBLE', coupon_code: null, saving: null }), 'INELIGIBLE'],
+            ['already redeemed', offer({ status: 'REDEEMED', coupon_code: null, saving: null }), 'REDEEMED'],
+            ['still ELIGIBLE (not reserved)', offer(), 'ELIGIBLE'],
+            ['claimed but no longer beneficial', offer({ status: 'CLAIMED', saving: money(15), current_saving: money(20) }), 'NOT_BENEFICIAL'],
+            ['claimed with a malformed saving', offer({ status: 'CLAIMED', saving: { value: 25, currency: 'USD' } }), 'UNAVAILABLE']
+        ])('a claim that comes back %s is not applied and leaves the cart unchanged', async (_label, claim, subcode) => {
+            const state = { cart: withCoupon('TRAILREADY', 20, readyCart), offer: offer() }
+            fakeCommerce(routes(state, { ShopClaimOffer: () => ({ data: { claimWkndRecoveryOffer: claim } }) }))
+            const before = (await getCart({}, shopper())).structuredContent.cart
+            global.fetch.calls.length = 0
+            const result = await prepare({ apply_offer: true, cart_version: before.version }, shopper())
+            expect(result.structuredContent.error).toMatchObject({ code: 'offer_not_applied', subcode })
+            expect(result.structuredContent.cart).toMatchObject({ version: before.version, coupons: ['TRAILREADY'], offer_applied: false })
+            expect(global.fetch.calls.map((c) => c.operation)).not.toContain('ShopCoupon')
+        })
+
+        test('a claim error is not applied', async () => {
             const state = { cart: readyCart(), offer: offer() }
+            fakeCommerce(routes(state, { ShopClaimOffer: () => ({ errors: [{ message: 'nope', extensions: { category: 'graphql' } }] }) }))
+            const result = await prepare({ apply_offer: true }, shopper())
+            expect(result.structuredContent.error).toMatchObject({ code: 'offer_not_applied', subcode: 'UNAVAILABLE' })
+            expect(global.fetch.calls.map((c) => c.operation)).not.toContain('ShopCoupon')
+        })
+
+        test('a cart that changes between the claim and the apply is not applied (race)', async () => {
+            const state = { cart: withCoupon('TRAILREADY', 20, readyCart), offer: offer() }
             fakeCommerce(routes(state, {
-                ShopClaimOffer: () => ({ data: { claimWkndRecoveryOffer: offer({ status: 'INELIGIBLE', coupon_code: null }) } })
+                ShopClaimOffer: () => {
+                    // the website changes the cart (a better code) after the review, mid-apply
+                    state.cart = withCoupon('WKND10', 60, readyCart)
+                    return { data: { claimWkndRecoveryOffer: offer({ status: 'CLAIMED' }) } }
+                }
+            }))
+            const before = (await getCart({}, shopper())).structuredContent.cart
+            global.fetch.calls.length = 0
+            const result = await prepare({ apply_offer: true, cart_version: before.version }, shopper())
+            expect(result.structuredContent.error).toMatchObject({ code: 'offer_not_applied', subcode: 'CART_CHANGED' })
+            expect(result.structuredContent.cart).toMatchObject({ coupons: ['WKND10'] })
+            expect(global.fetch.calls.map((c) => c.operation)).not.toContain('ShopCoupon')
+        })
+
+        test('the claim\'s own fresh comparison decides, not the earlier read', async () => {
+            const state = { cart: withCoupon('TRAILREADY', 20, readyCart), offer: offer({ saving: money(25), current_saving: money(20) }) }
+            fakeCommerce(routes(state, {
+                ShopClaimOffer: () => ({ data: { claimWkndRecoveryOffer: offer({ status: 'CLAIMED', saving: money(22), current_saving: money(20) }) } })
             }))
             const result = await prepare({ apply_offer: true }, shopper())
-            expect(result.structuredContent.error).toMatchObject({ code: 'offer_not_applied', subcode: 'INELIGIBLE' })
-            expect(global.fetch.calls.map((c) => c.operation)).not.toContain('ShopCoupon')
+            expect(result.isError).toBeUndefined()
+            expect(result.structuredContent.warnings[0]).toMatch(/saves A\$22\.00/)
+        })
+
+        test('an ordinary entered code is echoed in its warning, not redacted', async () => {
+            const state = { cart: readyCart(), offer: offer() }
+            fakeCommerce(routes(state, { ShopCoupon: () => ({ errors: [{ message: 'The coupon code "BOGUS1" is not valid.', extensions: { code: 'COUPON_NOT_FOUND' } }] }) }))
+            const result = await prepare({ coupon_code: 'bogus1' }, shopper())
+            expect(result.structuredContent.warnings[0]).toBe('Coupon BOGUS1 was not applied: The coupon code "BOGUS1" is not valid.')
         })
 
         test.each([

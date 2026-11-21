@@ -2,7 +2,7 @@
 // address (new or saved), delivery method and coupon. Never places an order.
 const {
   requireShopper, loadCart, assertVersion, graphql, failure, ShopError, formatMoney, text,
-  loadOffer, applyOffer, removeOffer, offerText, hideProtectedCoupons, maskCodes,
+  loadOffer, applyOffer, removeOffer, offerText, hideProtectedCoupons, maskCodes, sanitizeOutput,
   queries, constants,
 } = require('../lib/commerce.js');
 const { withAnalytics } = require('../lib/analytics.js');
@@ -142,7 +142,7 @@ const handler = async (args = {}, extra) => {
     };
 
     if (args.apply_offer === true) {
-      const applied = await applyOffer(extra, shopper, id, appliedCoupons);
+      const applied = await applyOffer(extra, shopper, id, appliedCoupons, before.version);
       warnings.push(`Welcome-back offer applied (saves ${formatMoney(applied.saving)}). The total changed, so review it again before ordering.`);
     } else if (args.apply_offer === false && await removeOffer(extra, shopper, id, appliedCoupons)) {
       warnings.push('Welcome-back offer removed.');
@@ -171,10 +171,10 @@ const handler = async (args = {}, extra) => {
     }
 
     const { id: cartId, cart, appliedCoupons: nowApplied } = await loadCart(extra, shopper);
-    const decision = await loadOffer(extra, shopper, cartId, nowApplied);
+    const decision = cart.lines.length ? await loadOffer(extra, shopper, cartId, nowApplied) : { code: null, offer: null };
     hideProtectedCoupons(cart, [decision.code]);
     const note = offerText(decision.offer);
-    return {
+    return sanitizeOutput({
       content: [{ type: 'text', text: note ? `${checkoutText(cart, warnings)} ${note}` : checkoutText(cart, warnings) }],
       structuredContent: {
         view: 'checkout',
@@ -185,7 +185,7 @@ const handler = async (args = {}, extra) => {
         warnings,
         notice: constants.DEMO_NOTICE,
       },
-    };
+    }, [decision.code]);
   } catch (error) {
     // Steps already applied stay applied; show the shopper the cart as it now is.
     if (started && error instanceof ShopError && !error.details?.cart) {

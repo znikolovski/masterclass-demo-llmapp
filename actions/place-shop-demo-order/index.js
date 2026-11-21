@@ -2,7 +2,7 @@
 // nothing ships. Requires the exact cart version and total the shopper confirmed, so a cart that
 // changed after review (another tab, the website, a retry) is never ordered by mistake.
 const {
-  requireShopper, loadCart, assertVersion, graphql, failure, ShopError, formatMoney, text, num, maskCodes,
+  requireShopper, loadCart, assertVersion, graphql, failure, ShopError, formatMoney, text, num, maskCodes, sanitizeOutput,
   queries, constants,
 } = require('../lib/commerce.js');
 const { withAnalytics } = require('../lib/analytics.js');
@@ -93,10 +93,10 @@ const handler = async (args = {}, extra) => {
     }
     const order = normalizeOrder(result.orderV2);
     const summary = `Demo order ${order.number} placed: ${order.items.reduce((n, i) => n + i.quantity, 0)} item(s), ${formatMoney(order.totals.grand_total)} incl. GST, ${order.shipping_method || 'WKND Shipping'} to ${order.ship_to}. ${constants.DEMO_NOTICE} View it at ${order.url}`;
-    return {
+    return sanitizeOutput({
       content: [{ type: 'text', text: summary }],
       structuredContent: { view: 'order', order, notice: constants.DEMO_NOTICE },
-    };
+    });
   } catch (error) {
     return failure(error);
   }

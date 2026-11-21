@@ -71,7 +71,7 @@ function signInChallenge(e) {
 function failure(error, extra = {}) {
   const e = error instanceof ShopError
     ? error : new ShopError(502, 'shop_unavailable', 'The WKND shop is unavailable. Please try again shortly.');
-  return {
+  return sanitizeOutput({
     isError: true,
     content: [{ type: 'text', text: e.message }],
     structuredContent: {
@@ -83,7 +83,7 @@ function failure(error, extra = {}) {
       ...extra,
     },
     ...(SIGN_IN_CODES[e.code] ? { _meta: { 'mcp/www_authenticate': [signInChallenge(e)] } } : {}),
-  };
+  }, e.details?.protectedCodes);
 }
 
 const text = (v, max = 500) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
@@ -682,9 +682,22 @@ function hideProtectedCoupons(cart, codes) {
 /** Replaces any protected promotion code in shopper-facing text. */
 function maskCodes(value, codes = []) {
   return [...PROTECTED_COUPON_CODES, ...codes].filter(Boolean).reduce(
-    (out, code) => out.replace(new RegExp(String(code).replace(/[^A-Za-z0-9]/g, '\\$&'), 'gi'), 'welcome-back offer'),
+    (out, code) => out.replace(new RegExp(`(?<![A-Za-z0-9])${String(code).replace(/[^A-Za-z0-9]/g, '\\$&')}(?![A-Za-z0-9])`, 'gi'), 'welcome-back offer'),
     String(value ?? ''),
   );
+}
+
+/**
+ * Masks protected promotion codes in every string of a tool result (content text, structured
+ * content, errors, warnings). Shopper-entered ordinary codes are left as they are.
+ */
+function sanitizeOutput(value, codes = []) {
+  if (typeof value === 'string') return maskCodes(value, codes);
+  if (Array.isArray(value)) return value.map((v) => sanitizeOutput(v, codes));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, sanitizeOutput(v, codes)]));
+  }
+  return value;
 }
 
 /**
@@ -731,40 +744,54 @@ const OFFER_COPY = {
   ALREADY_APPLIED: 'The welcome-back offer is already applied to this cart.',
   NOT_BENEFICIAL: 'The welcome-back offer would not save more than the discount already on this cart, so it was not applied.',
   REDEEMED: 'This offer has already been used.',
+  UNAVAILABLE: 'The welcome-back offer can’t be checked right now. Please try again shortly.',
+  CART_CHANGED: 'Your cart changed while the offer was being applied, so it was not applied. Review the cart and try again.',
   DEFAULT: 'This welcome-back offer isn’t available for this cart.',
 };
+const OFFER_STATUSES = ['SIGN_IN_REQUIRED', 'UNAVAILABLE', 'INELIGIBLE', 'ELIGIBLE', 'CLAIMED', 'REDEEMED'];
+
+/** A Commerce Money with a finite, non-negative value and an explicit ISO currency, or null. */
+function offerMoney(m) {
+  if (!m || typeof m.value !== 'number' || !Number.isFinite(m.value) || m.value < 0) return null;
+  if (typeof m.currency !== 'string' || !/^[A-Z]{3}$/.test(m.currency)) return null;
+  return { value: m.value, currency: m.currency };
+}
 
 /**
  * Commerce decides eligibility and savings; this only applies the agreed display rule:
- * ELIGIBLE/CLAIMED, saving > current saving, and its code not already on the cart.
+ * ELIGIBLE/CLAIMED, saving > current saving (both valid, same currency), and its code not already
+ * on the cart. Not signed in / ineligible / redeemed → no offer. A failed or malformed answer →
+ * an explicit, non-actionable { status: 'UNAVAILABLE', message } (never mistaken for "no offer").
  * @returns {{ status: string, code: string|null, show: boolean, why: string|null, offer: object|null }}
  */
 function offerDecision(raw, appliedCoupons = []) {
-  const status = text(raw?.status, 30) || 'UNAVAILABLE';
+  const status = OFFER_STATUSES.includes(raw?.status) ? raw.status : 'UNAVAILABLE';
   const code = text(raw?.coupon_code, 40).toUpperCase() || null;
-  const saving = money(raw?.saving);
-  const current = money(raw?.current_saving) || { value: 0, currency: saving?.currency || 'AUD' };
-  let why = null;
-  if (!['ELIGIBLE', 'CLAIMED'].includes(status) || !code) why = status === 'ELIGIBLE' || status === 'CLAIMED' ? 'UNAVAILABLE' : status;
-  else if (appliedCoupons.includes(code)) why = 'ALREADY_APPLIED';
-  else if (!saving || !(saving.value > current.value)) why = 'NOT_BENEFICIAL';
-  const replaces = appliedCoupons.find((c) => c !== code && !PROTECTED_COUPON_CODES.includes(c)) || null;
-  const offer = why ? null : {
+  const result = (why, offer = null) => ({
+    status, code, show: !why, why, offer,
+  });
+  const unavailable = () => result('UNAVAILABLE', { kind: 'welcome_back', status: 'UNAVAILABLE', message: OFFER_COPY.UNAVAILABLE });
+  if (['SIGN_IN_REQUIRED', 'INELIGIBLE', 'REDEEMED'].includes(status)) return result(status);
+  if (status === 'UNAVAILABLE') return unavailable();
+  const saving = offerMoney(raw.saving);
+  const current = offerMoney(raw.current_saving);
+  if (!code || !saving || !current || saving.currency !== current.currency) return unavailable();
+  if (appliedCoupons.includes(code)) return result('ALREADY_APPLIED');
+  if (!(saving.value > current.value)) return result('NOT_BENEFICIAL');
+  const hidden = [...PROTECTED_COUPON_CODES, code];
+  return result(null, {
     kind: 'welcome_back',
     status,
     saving,
     current_saving: current,
     percent_off: num(raw.percent_off),
-    max_discount: money(raw.max_discount),
+    max_discount: offerMoney(raw.max_discount),
     expires_at: text(raw.expires_at, 40) || null,
-    replaces_code: replaces,
-  };
-  return {
-    status, code, show: !why, why, offer,
-  };
+    replaces_code: appliedCoupons.find((c) => !hidden.includes(c)) || null,
+  });
 }
 
-/** The offer to display, or null. A failed lookup never blocks the cart. */
+/** The offer to show with the cart. A failed lookup returns the explicit UNAVAILABLE state. */
 async function loadOffer(extra, shopper, cartId, appliedCoupons) {
   if (!cartId) return offerDecision(null, appliedCoupons);
   try {
@@ -777,33 +804,39 @@ async function loadOffer(extra, shopper, cartId, appliedCoupons) {
   }
 }
 
-function offerNotApplied(subcode, message) {
-  return new ShopError(409, 'offer_not_applied', message || OFFER_COPY[subcode] || OFFER_COPY.DEFAULT, { subcode });
+function offerNotApplied(subcode, message, details = {}) {
+  return new ShopError(409, 'offer_not_applied', message || OFFER_COPY[subcode] || OFFER_COPY.DEFAULT, { ...details, subcode });
 }
 
 /**
  * Claims the welcome-back offer and applies its code (replacing any current code) server-side;
  * the code never leaves this function. Throws offer_not_applied when Commerce says no.
+ *
+ * Not atomic: Commerce's applyCouponToCart replaces the stored coupon unconditionally and its
+ * saving comparison is a read. The window is narrowed by (1) the caller's cart_version check,
+ * (2) re-validating the claim's own fresh comparison, and (3) re-reading the cart right before
+ * the apply and refusing if it changed since `expectedVersion`.
  */
-async function applyOffer(extra, shopper, cartId, appliedCoupons) {
+async function applyOffer(extra, shopper, cartId, appliedCoupons, expectedVersion) {
   const read = await graphql(extra, OFFER_QUERY, { cartId }, { shopper });
-  if (read.errors.length) throw offerNotApplied('UNAVAILABLE');
-  const decision = offerDecision(read.data.wkndRecoveryOffer, appliedCoupons);
-  if (!decision.show) throw offerNotApplied(decision.why);
-  let { code } = decision;
-  if (decision.status !== 'CLAIMED') {
+  const first = offerDecision(read.errors.length ? null : read.data.wkndRecoveryOffer, appliedCoupons);
+  if (!first.show) throw offerNotApplied(first.why);
+  let claimed = first;
+  if (first.status !== 'CLAIMED') {
     const claim = await graphql(extra, CLAIM_OFFER_MUTATION, { cartId }, { shopper });
-    const claimed = claim.errors.length ? null : claim.data.claimWkndRecoveryOffer;
-    const status = text(claimed?.status, 30);
-    if (status !== 'CLAIMED' || !text(claimed?.coupon_code, 40)) throw offerNotApplied(claim.errors.length ? 'UNAVAILABLE' : status || 'UNAVAILABLE');
-    code = text(claimed.coupon_code, 40).toUpperCase();
+    claimed = offerDecision(claim.errors.length ? null : claim.data.claimWkndRecoveryOffer, appliedCoupons);
+    if (claimed.status !== 'CLAIMED' || !claimed.show) {
+      throw offerNotApplied(claimed.status === 'CLAIMED' ? claimed.why : claimed.status);
+    }
   }
-  const { errors } = await graphql(extra, COUPON_MUTATION, { input: { cart_id: cartId, coupon_code: code } }, { shopper });
+  const { cart: latest } = await loadCart(extra, shopper);
+  if (latest.version !== expectedVersion) throw offerNotApplied('CART_CHANGED', undefined, { cart: latest });
+  const { errors } = await graphql(extra, COUPON_MUTATION, { input: { cart_id: cartId, coupon_code: claimed.code } }, { shopper });
   if (errors.length) {
     const reason = text(errors[0]?.extensions?.code, 60);
     throw offerNotApplied(reason || 'UNAVAILABLE', OFFER_ERROR_CODES.includes(reason) ? text(errors[0].message, 200) : undefined);
   }
-  return { code, saving: decision.offer.saving };
+  return { code: claimed.code, saving: claimed.offer.saving };
 }
 
 /** Removes the welcome-back offer from the cart (only when one is applied). */
@@ -822,6 +855,7 @@ const formatDate = (iso) => {
 /** Model-facing description of a displayable offer (no code, no eligibility reasons). */
 function offerText(offer) {
   if (!offer) return '';
+  if (offer.status === 'UNAVAILABLE') return `${offer.message} Do not promise a welcome-back discount.`;
   const ends = formatDate(offer.expires_at);
   const terms = [
     offer.percent_off !== null ? `${offer.percent_off}% off gear` : null,
@@ -871,6 +905,7 @@ module.exports = {
   offerText,
   hideProtectedCoupons,
   maskCodes,
+  sanitizeOutput,
   assertVersion,
   cartText,
   formatMoney,

@@ -2,7 +2,7 @@
 // Flat arguments (sku, quantity, options, cart_version): the LLM Apps UI has no array type.
 const {
   requireShopper, loadCart, assertVersion, getProducts, resolveOptions, attachSoldOutVariants,
-  isSoldOutCombination, comboTitle, graphql, normalizeCart, failure, ShopError, cartText, text, queries,
+  isSoldOutCombination, comboTitle, graphql, normalizeCart, failure, ShopError, cartText, text, queries, sanitizeOutput,
   constants,
 } = require('../lib/commerce.js');
 const { withAnalytics } = require('../lib/analytics.js');
@@ -71,12 +71,12 @@ const handler = async (args = {}, extra) => {
       return failure(new ShopError(409, 'not_added', `Not added: ${problems.join(' ')}`), { cart });
     }
     const note = `Added ${items[0].quantity} × ${products.find((p) => p.sku === items[0].sku)?.name || items[0].sku} to your WKND cart.`;
-    return {
+    return sanitizeOutput({
       content: [{ type: 'text', text: `${note}\n${cartText(cart)}` }],
       structuredContent: {
         view: 'cart', cart, message: note, warnings: [], notice: constants.DEMO_NOTICE,
       },
-    };
+    });
   } catch (error) {
     return failure(error);
   }
