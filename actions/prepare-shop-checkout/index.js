@@ -2,6 +2,8 @@
 // address (new or saved), delivery method and coupon. Never places an order.
 const {
   requireShopper, loadCart, assertVersion, graphql, failure, ShopError, formatMoney, text,
+  loadOffer, applyOffer, removeOffer, offerText, hideProtectedCoupons, maskCodes, sanitizeOutput,
+  throwIfCartChanged,
   queries, constants,
 } = require('../lib/commerce.js');
 const { withAnalytics } = require('../lib/analytics.js');
@@ -82,6 +84,7 @@ function checkoutText(cart, warnings) {
     parts.push(`Delivery options: ${c.shipping_methods.map((m) => `${m.code} (${m.title}, ${formatMoney(m.amount)})`).join('; ')}.${c.shipping_method ? ` Selected: ${c.shipping_method.code}.` : ''}`);
   }
   parts.push(`Total: ${formatMoney(cart.totals.grand_total)} incl. GST.`);
+  if (cart.offer_applied) parts.push('The welcome-back offer is applied.');
   if (warnings.length) parts.push(`Notes: ${warnings.join(' ')}`);
   parts.push(cart.ready
     ? 'Ready to place a WKND Demo Pay order. The shopper must explicitly confirm the review in the cart widget; no payment is taken and nothing ships.'
@@ -113,9 +116,28 @@ const handler = async (args = {}, extra) => {
     if (savedId !== undefined && args.shipping_address !== undefined) {
       throw new ShopError(400, 'invalid_address', 'Use either saved_address_id or shipping_address, not both.');
     }
+    ['apply_offer', 'remove_offer'].forEach((flag) => {
+      if (args[flag] !== undefined && typeof args[flag] !== 'boolean') {
+        throw new ShopError(400, `invalid_${flag}`, `${flag} must be true or false.`);
+      }
+    });
+    // Only an active (true) offer action counts; false or omitted leaves the offer unchanged.
+    const applyOn = args.apply_offer === true;
+    const removeOn = args.remove_offer === true;
+    if (applyOn && removeOn) {
+      throw new ShopError(400, 'conflicting_offer_actions', 'Use either apply_offer or remove_offer, not both.');
+    }
+    if ((applyOn || removeOn) && coupon !== undefined) {
+      throw new ShopError(400, 'conflicting_discounts', `Use either ${applyOn ? 'apply_offer' : 'remove_offer'} or coupon_code, not both.`);
+    }
+    if ((applyOn || removeOn) && args.cart_version === undefined) {
+      throw new ShopError(400, 'cart_version_required', 'Changing the welcome-back offer needs the cart_version of the cart the shopper reviewed.');
+    }
     const address = args.shipping_address === undefined ? undefined : parseAddress(args.shipping_address);
 
-    const { id, cart: before } = await loadCart(extra, shopper);
+    const {
+      id, cart: before, serverVersion,
+    } = await loadCart(extra, shopper);
     if (!before.lines.length) throw new ShopError(400, 'cart_empty', 'Your WKND cart is empty. Add gear before checking out.', { cart: before });
     assertVersion(before, args.cart_version);
 
@@ -133,9 +155,23 @@ const handler = async (args = {}, extra) => {
       if (errors.length) throw new ShopError(400, 'shop_request_rejected', text(errors[0]?.message, 300) || 'The shop rejected that checkout detail.');
     };
 
+    // serverVersion came from the same read whose cart_version was just asserted to be the one the
+    // shopper reviewed, so Commerce writes only if the cart is still in exactly that state.
+    if (applyOn) {
+      const applied = await applyOffer(extra, shopper, id, serverVersion);
+      warnings.push(applied.outcome === 'APPLIED'
+        ? 'Welcome-back offer applied. The total changed, so review it again before ordering.'
+        : 'The welcome-back offer is already applied to this cart, so nothing changed.');
+    } else if (removeOn) {
+      const result = await removeOffer(extra, shopper, id, serverVersion);
+      warnings.push(result.removed
+        ? 'Welcome-back offer removed. The total changed, so review it again before ordering.'
+        : 'No welcome-back offer is applied to this cart, so nothing changed.');
+    }
     if (coupon) {
       const { errors } = await graphql(extra, queries.COUPON_MUTATION, { input: { cart_id: id, coupon_code: coupon } }, { shopper });
-      if (errors.length) warnings.push(`Coupon ${coupon} was not applied: ${text(errors[0]?.message, 200)}`);
+      throwIfCartChanged(errors);
+      if (errors.length) warnings.push(`Coupon ${coupon} was not applied: ${maskCodes(text(errors[0]?.message, 200))}`);
     }
     const accountEmail = customer?.email && !constants.PLACEHOLDER_EMAIL.test(customer.email) ? customer.email : null;
     const contact = email || (!before.checkout.email ? accountEmail : null);
@@ -156,23 +192,31 @@ const handler = async (args = {}, extra) => {
       await run(queries.PAYMENT_MUTATION, { cart_id: id, payment_method: { code: constants.PAYMENT_METHOD } });
     }
 
-    const { cart } = await loadCart(extra, shopper);
-    return {
-      content: [{ type: 'text', text: checkoutText(cart, warnings) }],
+    const {
+      id: cartId, cart, appliedCoupons: nowApplied, serverVersion: nowVersion,
+    } = await loadCart(extra, shopper);
+    const decision = cart.lines.length
+      ? await loadOffer(extra, shopper, cartId, nowApplied, nowVersion)
+      : { code: null, offer: null };
+    hideProtectedCoupons(cart, [decision.code]);
+    const note = offerText(decision.offer);
+    return sanitizeOutput({
+      content: [{ type: 'text', text: note ? `${checkoutText(cart, warnings)} ${note}` : checkoutText(cart, warnings) }],
       structuredContent: {
         view: 'checkout',
         cart,
+        offer: decision.offer,
         saved_addresses: saved,
         account_email: accountEmail,
         warnings,
         notice: constants.DEMO_NOTICE,
       },
-    };
+    }, [decision.code]);
   } catch (error) {
     // Steps already applied stay applied; show the shopper the cart as it now is.
     if (started && error instanceof ShopError && !error.details?.cart) {
       try {
-        error.details = { cart: (await loadCart(extra, shopper)).cart };
+        error.details = { ...error.details, cart: (await loadCart(extra, shopper)).cart };
       } catch { /* keep the original error */ }
     }
     return failure(error);
