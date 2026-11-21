@@ -100,6 +100,7 @@ function cart (overrides = {}) {
             discounts: []
         },
         applied_coupons: [],
+        wknd_cart_version: 'v1',
         shipping_addresses: [],
         billing_address: null,
         selected_payment_method: { code: '', title: '' },

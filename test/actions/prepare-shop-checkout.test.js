@@ -32,7 +32,7 @@ describe('prepare-shop-checkout', () => {
         fakeCommerce(routes(state))
         const result = await handler({ email: 'sam@example.com', shipping_address: ADDRESS, shipping_method: 'Express' }, shopper())
         const ops = global.fetch.calls.map((c) => c.operation)
-        expect(ops).toEqual(['ShopCart', 'ShopCustomer', 'ShopEmail', 'ShopShipTo', 'ShopBillTo', 'ShopShipVia', 'ShopPay', 'ShopCart'])
+        expect(ops).toEqual(['ShopCart', 'ShopCustomer', 'ShopEmail', 'ShopShipTo', 'ShopBillTo', 'ShopShipVia', 'ShopPay', 'ShopCart', 'ShopOffer'])
         const call = (op) => global.fetch.calls.find((c) => c.operation === op).variables.input
         expect(call('ShopShipTo').shipping_addresses[0].address).toMatchObject({ region: 'NSW', country_code: 'AU', street: ['1 Trail Rd'], save_in_address_book: false })
         expect(call('ShopBillTo').billing_address).toEqual({ same_as_shipping: true })
