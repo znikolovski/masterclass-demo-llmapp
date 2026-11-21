@@ -503,12 +503,13 @@ reasons are never requested. Protected promotion codes (the offer's own code, pl
 cart says `offer_applied: true`) and masked in every string of every shop tool result; ordinary
 shopper-entered codes are shown as usual. `cart_version` still hashes the raw codes.
 
-`prepare-shop-checkout` with `apply_offer: true` checks `cart_version`, re-reads the offer, claims it
+`prepare-shop-checkout` with `apply_offer: true` requires the reviewed `cart_version` (as does `false`), re-reads the offer, claims it
 (the claim's own response must be `CLAIMED` and still beneficial), re-reads the cart and refuses if
 it changed since review (`CART_CHANGED`), then applies the code server-side (replacing the current
-code); the total changes, so the shopper reviews again before ordering. This is not atomic: Commerce
-replaces the stored coupon unconditionally and its comparison is a read, so a change in the
-milliseconds between the last cart read and the apply is not prevented here. `apply_offer: false` removes an applied welcome-back offer.
+code); the total changes, so the shopper reviews again before ordering. This is NOT a no-downgrade
+guarantee: Commerce replaces the stored coupon unconditionally and its comparison is a read, so a
+change after the last cart read and before the apply is not prevented here (an atomic guard has to
+live in Commerce). `apply_offer: false` removes an applied welcome-back offer.
 `apply_offer` and `coupon_code` cannot be combined. A refusal is an explicit `offer_not_applied`
 error (`subcode` = Commerce status, `NOT_BENEFICIAL`, `ALREADY_APPLIED`, `CART_CHANGED`,
 `UNAVAILABLE`, or the Commerce error code, whose code-free message is shown as-is). `place-shop-demo-order` reports an offer that stopped being valid as

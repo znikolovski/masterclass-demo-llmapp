@@ -121,6 +121,9 @@ const handler = async (args = {}, extra) => {
     if (args.apply_offer !== undefined && coupon !== undefined) {
       throw new ShopError(400, 'conflicting_discounts', 'Use either apply_offer or coupon_code, not both.');
     }
+    if (args.apply_offer !== undefined && args.cart_version === undefined) {
+      throw new ShopError(400, 'cart_version_required', 'Changing the welcome-back offer needs the cart_version of the cart the shopper reviewed.');
+    }
     const address = args.shipping_address === undefined ? undefined : parseAddress(args.shipping_address);
 
     const { id, cart: before, appliedCoupons } = await loadCart(extra, shopper);
@@ -142,7 +145,7 @@ const handler = async (args = {}, extra) => {
     };
 
     if (args.apply_offer === true) {
-      const applied = await applyOffer(extra, shopper, id, appliedCoupons, before.version);
+      const applied = await applyOffer(extra, shopper, id, appliedCoupons, args.cart_version);
       warnings.push(`Welcome-back offer applied (saves ${formatMoney(applied.saving)}). The total changed, so review it again before ordering.`);
     } else if (args.apply_offer === false && await removeOffer(extra, shopper, id, appliedCoupons)) {
       warnings.push('Welcome-back offer removed.');

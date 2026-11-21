@@ -812,10 +812,12 @@ function offerNotApplied(subcode, message, details = {}) {
  * Claims the welcome-back offer and applies its code (replacing any current code) server-side;
  * the code never leaves this function. Throws offer_not_applied when Commerce says no.
  *
- * Not atomic: Commerce's applyCouponToCart replaces the stored coupon unconditionally and its
- * saving comparison is a read. The window is narrowed by (1) the caller's cart_version check,
- * (2) re-validating the claim's own fresh comparison, and (3) re-reading the cart right before
- * the apply and refusing if it changed since `expectedVersion`.
+ * NOT a no-downgrade guarantee: Commerce's applyCouponToCart replaces the stored coupon
+ * unconditionally and its saving comparison is a read. This only narrows the window: (1) the
+ * shopper's reviewed cart_version is required and checked, (2) the claim's own fresh comparison
+ * must pass, and (3) the cart is re-read right before the apply and a change since the reviewed
+ * `expectedVersion` is refused. A change after that last read is not prevented here; an atomic
+ * guard has to live in Commerce.
  */
 async function applyOffer(extra, shopper, cartId, appliedCoupons, expectedVersion) {
   const read = await graphql(extra, OFFER_QUERY, { cartId }, { shopper });
