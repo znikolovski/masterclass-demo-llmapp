@@ -68,18 +68,9 @@ class ShopError extends Error {
 const SIGN_IN_CODES = { authentication_required: 'invalid_token', insufficient_scope: 'insufficient_scope' };
 const resourceMetadataUrl = (resource) => `${new URL(resource).origin}/.well-known/oauth-protected-resource`;
 
-// MCP resources (OAuth audiences) this app may be deployed as. WKND_MCP_RESOURCE selects one per
-// workspace (Stage sets the Stage URL); anything else is a misconfiguration and fails closed.
-const MCP_RESOURCES = [MCP_RESOURCE, 'https://28538-wkndsherpa-stage.adobeio-static.net/api/v1/web/llm-apps/mcp'];
-function mcpResource(extra) {
-  const configured = extra?.variables?.WKND_MCP_RESOURCE;
-  if (configured === undefined || configured === '') return MCP_RESOURCE;
-  if (!MCP_RESOURCES.includes(configured)) {
-    throw new ShopError(503, 'shop_configuration_error', 'Cart sign-in is not configured correctly for this app.');
-  }
-  return configured;
-}
-
+// Points at this deployment's metadata when the runtime told us its resource (a scope step-up);
+// with no token at all the runtime's own per-action auth gate normally answers first, and this
+// Production fallback only applies to tools registered without it.
 function signInChallenge(e) {
   const metadata = e.details?.resourceMetadata || resourceMetadataUrl(MCP_RESOURCE);
   return `Bearer error="${SIGN_IN_CODES[e.code]}", error_description="${e.message.replace(/"/g, "'")}", resource_metadata="${metadata}", scope="${SHOP_SCOPE}"`;
@@ -125,21 +116,31 @@ function graphqlUrl(extra) {
 
 /**
  * The verified WKND shopper for this call (ownership always comes from sign-in, never from
- * tool arguments). Throws a 401/403 ShopError otherwise.
+ * tool arguments). Throws a 401/403 ShopError otherwise. The LLM Apps runtime has already
+ * verified the token's signature, issuer and audience against this deployment's own resource
+ * (Stage or Production) and reports that resource in `authInfo.resource`.
  */
+function verifiedResource(auth) {
+  try {
+    const url = new URL(auth?.resource);
+    return url.protocol === 'https:' && !url.username && !url.password ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
 function requireShopper(extra) {
   const auth = extra?.authInfo;
-  const resource = mcpResource(extra);
-  const signIn = { resourceMetadata: resourceMetadataUrl(resource) };
   const now = Math.floor(Date.now() / 1000);
+  const resource = verifiedResource(auth);
   if (typeof auth?.extra?.sub !== 'string' || !auth.extra.sub.trim()
-    || auth.resource !== resource
+    || !resource
     || !Number.isSafeInteger(auth.expiresAt) || auth.expiresAt <= now
     || (auth.extra.iss !== undefined && auth.extra.iss !== IDENTITY_ISSUER)) {
-    throw new ShopError(401, 'authentication_required', 'Sign in with your WKND account to use your cart.', signIn);
+    throw new ShopError(401, 'authentication_required', 'Sign in with your WKND account to use your cart.');
   }
   if (!Array.isArray(auth.scopes) || !auth.scopes.includes(SHOP_SCOPE)) {
-    throw new ShopError(403, 'insufficient_scope', `Cart access requires the ${SHOP_SCOPE} permission. Sign in again and allow cart access.`, signIn);
+    throw new ShopError(403, 'insufficient_scope', `Cart access requires the ${SHOP_SCOPE} permission. Sign in again and allow cart access.`, { resourceMetadata: resourceMetadataUrl(resource) });
   }
   const email = typeof auth.extra.email === 'string' && auth.extra.email.length <= 254 ? auth.extra.email : undefined;
   return { sub: auth.extra.sub, expiresAt: auth.expiresAt, email };
@@ -153,7 +154,7 @@ function assertion(shopper, extra, orderExpect) {
   const now = Math.floor(Date.now() / 1000);
   const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
   const payload = {
-    // Commerce's configured delegation issuer in every workspace (not the per-workspace OAuth resource).
+    // Commerce's configured delegation issuer (an identifier, the same in every workspace).
     iss: MCP_RESOURCE,
     aud: DELEGATION_AUDIENCE,
     sub: shopper.sub,

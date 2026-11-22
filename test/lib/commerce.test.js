@@ -13,47 +13,35 @@ describe('requireShopper', () => {
 
     test.each([
         ['no auth', {}],
-        ['wrong resource', { authInfo: { ...shopper().authInfo, resource: 'https://other.example/mcp' } }],
+        ['no verified resource', { authInfo: { ...shopper().authInfo, resource: undefined } }],
+        ['a non-https resource', { authInfo: { ...shopper().authInfo, resource: 'http://28538-wkndsherpa.adobeio-static.net/api/v1/web/llm-apps/mcp' } }],
         ['expired', { authInfo: { ...shopper().authInfo, expiresAt: Math.floor(Date.now() / 1000) - 1 } }],
         ['foreign issuer', { authInfo: { ...shopper().authInfo, extra: { sub: SUB, iss: 'https://evil.example/' } } }]
     ])('rejects %s as authentication_required', (_, extra) => {
         expect(() => requireShopper(extra)).toThrow(expect.objectContaining({ status: 401, code: 'authentication_required' }))
     })
 
-    describe('per-workspace MCP resource (WKND_MCP_RESOURCE)', () => {
+    describe('per-deployment resource (verified by the LLM Apps runtime)', () => {
         const STAGE = 'https://28538-wkndsherpa-stage.adobeio-static.net/api/v1/web/llm-apps/mcp'
-        const stage = (resource) => ({ ...shopper(), authInfo: { ...shopper().authInfo, resource }, variables: { WKND_MCP_RESOURCE: STAGE } })
+        const stage = (o = {}) => ({ ...shopper(), authInfo: { ...shopper().authInfo, resource: STAGE, ...o } })
 
-        test('Stage accepts tokens for the Stage resource and refuses Production ones', () => {
-            expect(requireShopper(stage(STAGE))).toMatchObject({ sub: SUB })
-            expect(() => requireShopper(stage(MCP_RESOURCE))).toThrow(expect.objectContaining({ status: 401, code: 'authentication_required' }))
+        test('accepts a shopper on the Stage deployment, with no configuration', () => {
+            expect(requireShopper(stage())).toMatchObject({ sub: SUB })
         })
 
-        test('Production (unset) refuses Stage tokens', () => {
-            expect(() => requireShopper({ authInfo: { ...shopper().authInfo, resource: STAGE } }))
-                .toThrow(expect.objectContaining({ status: 401, code: 'authentication_required' }))
-        })
-
-        test('the Stage sign-in challenge points at Stage metadata', () => {
+        test('a scope step-up on Stage points at Stage metadata', () => {
             let error
-            try { requireShopper({ variables: { WKND_MCP_RESOURCE: STAGE } }) } catch (e) { error = e }
-            expect(commerce.failure(error)._meta['mcp/www_authenticate'][0])
+            try { requireShopper(stage({ scopes: ['bookings:read'] })) } catch (e) { error = e }
+            const result = commerce.failure(error)
+            expect(result._meta['mcp/www_authenticate'][0])
                 .toContain('resource_metadata="https://28538-wkndsherpa-stage.adobeio-static.net/.well-known/oauth-protected-resource"')
-            expect(JSON.stringify(commerce.failure(error).structuredContent)).not.toContain('resourceMetadata')
+            expect(JSON.stringify(result.structuredContent)).not.toContain('resourceMetadata')
         })
 
-        test('an unknown resource fails closed without a sign-in loop', () => {
-            const extra = { ...shopper(), variables: { WKND_MCP_RESOURCE: 'https://evil.example/mcp' } }
-            let error
-            try { requireShopper(extra) } catch (e) { error = e }
-            expect(error).toMatchObject({ status: 503, code: 'shop_configuration_error' })
-            expect(commerce.failure(error)).not.toHaveProperty('_meta')
-        })
-
-        test('the Commerce assertion issuer is unchanged on Stage', async () => {
+        test('the Commerce assertion issuer is the same on Stage', async () => {
             const originalFetch = global.fetch
             try {
-                const extra = { ...stage(STAGE), variables: { WKND_MCP_RESOURCE: STAGE, WKND_COMMERCE_ASSERTION_SECRET: SECRET } }
+                const extra = stage()
                 fakeCommerce({ ShopCart: () => ({ data: { customerCart: cart() } }) })
                 await graphql(extra, 'query ShopCart { customerCart { id } }', {}, { shopper: requireShopper(extra) })
                 const token = global.fetch.calls[0].headers.Authorization.split(' ')[1]

@@ -448,7 +448,6 @@ shop does not sell (tents, stoves, maps) stays a plain checklist item.
    | Variable | UI type | Value |
    | --- | --- | --- |
    | `WKND_COMMERCE_GRAPHQL_URL` | `string` | Optional HTTPS URL of the `storefront-graphql` web action. Defaults to production `https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce/storefront-graphql`. |
-   | `WKND_MCP_RESOURCE` | `string` | Optional. The OAuth resource (MCP URL) this workspace's cart tools accept and advertise. Unset = Production `https://28538-wkndsherpa.adobeio-static.net/api/v1/web/llm-apps/mcp`; Stage sets `https://28538-wkndsherpa-stage.adobeio-static.net/api/v1/web/llm-apps/mcp` (Auth0 needs an API with that identifier and `shop:cart`). Any other value fails closed. The Commerce assertion issuer stays the Production URL in every workspace. |
    | `WKND_COMMERCE_ASSERTION_SECRET` | Server-side secret | Required for cart tools: ≥ 32 bytes, identical to `wknd-commerce`'s `WKND_MCP_DELEGATION_SECRET`. Same provisioning caveat as `WKND_BOOKING_ASSERTION_SECRET`: never commit, print or store it as an ordinary variable. |
 
 3. **Per tool:** if the UI offers per-action auth, set `requiresAuth: true` with required scope
