@@ -1,0 +1,110 @@
+// General (audience-qualified) offers: Stage-only, best-effort consumer of Commerce's decision.
+jest.mock('../../actions/lib/analytics.js', () => ({ withAnalytics: (_name, handler) => handler }))
+
+const getCart = require('../../actions/get-shop-cart/index.js')
+const prepare = require('../../actions/prepare-shop-checkout/index.js')
+const { generalOfferDecision } = require('../../actions/lib/commerce.js')
+const { shopper, cart, money, fakeCommerce } = require('../fixtures/shop.js')
+
+const STAGE = 'https://28538-wkndsherpa-stage.adobeio-static.net/api/v1/web/llm-apps/mcp'
+const stageShopper = () => shopper({ resource: STAGE })
+
+const planner = (overrides = {}) => ({
+    status: 'ELIGIBLE',
+    percent_off: 10,
+    max_discount: money(25),
+    expires_at: null,
+    saving: money(25),
+    current_saving: money(0),
+    ...overrides
+})
+const PLANNER_DTO = {
+    kind: 'climbing_planner',
+    status: 'ELIGIBLE',
+    saving: money(25),
+    current_saving: money(0),
+    percent_off: 10,
+    max_discount: money(25),
+    expires_at: null
+}
+const recovery = (status = 'INELIGIBLE', overrides = {}) => ({
+    status,
+    coupon_code: 'RECOVER10',
+    percent_off: 10,
+    max_discount: money(25),
+    expires_at: '2026-11-24T01:00:00.000Z',
+    saving: money(25),
+    current_saving: money(20),
+    ...overrides
+})
+const routes = (recoveryOffer, general) => ({
+    ShopCart: () => ({ data: { customerCart: cart() } }),
+    ShopOffer: () => ({ data: { wkndRecoveryOffer: recoveryOffer } }),
+    ShopPlannerOffer: general,
+    ShopEmail: () => ({ data: { setGuestEmailOnCart: { cart: { id: 'masked-cart-id' } } } }),
+    ShopPay: () => ({ data: { setPaymentMethodOnCart: { cart: { id: 'masked-cart-id' } } } }),
+    ShopCustomer: () => ({ data: { customer: { email: 'sam@example.com', addresses: [] } } })
+})
+
+describe('general offers', () => {
+    const originalFetch = global.fetch
+    afterEach(() => { global.fetch = originalFetch })
+
+    test('Stage shows Commerce’s climbing planner offer with display fields only and no claim step', async () => {
+        fakeCommerce(routes(recovery(), () => ({
+            data: { wkndPlannerOffer: planner({ audience_key: 'climbing-planner', draft_id: 'pdr_x', source: 'target-aam-decision', financialAuthorization: false }) }
+        })))
+        const result = await getCart({}, stageShopper())
+        expect(result.structuredContent.offer).toEqual(PLANNER_DTO)
+        expect(result.content[0].text).toMatch(/climbing planner offer saves A\$25\.00 on this cart \(10% off selected climbing gear, up to A\$25\.00\)\. WKND applies it automatically.*do not call apply_offer/)
+        expect(JSON.stringify(result)).not.toMatch(/pdr_|climbing-planner|target-aam|financialAuthorization|RECOVER10/)
+        expect(global.fetch.calls.find((c) => c.operation === 'ShopPlannerOffer').variables).toEqual({ cartId: 'masked-cart-id' })
+    })
+
+    test('a claimable welcome-back offer is shown ahead of the general offer', async () => {
+        fakeCommerce(routes(recovery('ELIGIBLE'), () => ({ data: { wkndPlannerOffer: planner() } })))
+        const result = await getCart({}, stageShopper())
+        expect(result.structuredContent.offer.kind).toBe('welcome_back')
+        expect(JSON.stringify(result)).not.toMatch(/RECOVER10/)
+    })
+
+    test('a missing or failing provider never changes the cart or the welcome-back result', async () => {
+        for (const general of [
+            () => ({ errors: [{ message: 'Cannot query field "wkndPlannerOffer" on type "Query".' }] }),
+            () => { throw new Error('network down') },
+            () => ({ data: { wkndPlannerOffer: null } })
+        ]) {
+            fakeCommerce(routes(recovery(), general))
+            const result = await getCart({}, stageShopper())
+            expect(result.isError).toBeFalsy()
+            expect(result.structuredContent.offer).toBeNull()
+            expect(result.structuredContent.cart.lines).toHaveLength(1)
+        }
+    })
+
+    test('Production never asks for general offers', async () => {
+        fakeCommerce(routes(recovery(), () => { throw new Error('must not be called') }))
+        const result = await getCart({}, shopper())
+        expect(result.structuredContent.offer).toBeNull()
+        expect(global.fetch.calls.map((c) => c.operation)).not.toContain('ShopPlannerOffer')
+    })
+
+    test('checkout shows the same decision', async () => {
+        fakeCommerce(routes(recovery(), () => ({ data: { wkndPlannerOffer: planner() } })))
+        const result = await prepare({}, stageShopper())
+        expect(result.structuredContent.offer).toEqual(PLANNER_DTO)
+    })
+
+    test('decoding follows the v1 rules', () => {
+        expect(generalOfferDecision(null)).toBeNull()
+        expect(generalOfferDecision(planner({ status: 'INELIGIBLE' }))).toBeNull()
+        expect(generalOfferDecision(planner({ saving: money(25), current_saving: money(25) }))).toBeNull()
+        const unavailable = { kind: 'climbing_planner', status: 'UNAVAILABLE', message: expect.stringMatching(/can’t be checked/) }
+        expect(generalOfferDecision(planner({ status: 'UNAVAILABLE', message: 'raw provider text' }))).toEqual(unavailable)
+        expect(generalOfferDecision(planner({ current_saving: undefined }))).toEqual(unavailable)
+        expect(generalOfferDecision(planner({ saving: { value: '25', currency: 'AUD' } }))).toEqual(unavailable)
+        expect(generalOfferDecision(planner({ max_discount: { value: 25, currency: 'USD' } })).max_discount).toBeNull()
+        expect(generalOfferDecision(planner({ status: 'CLAIMED', expires_at: '2026-12-01T09:00:00.000Z' })))
+            .toEqual({ ...PLANNER_DTO, status: 'CLAIMED', expires_at: '2026-12-01T09:00:00.000Z' })
+    })
+})
