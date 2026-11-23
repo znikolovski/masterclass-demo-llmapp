@@ -1,4 +1,3 @@
-/* global fetch, AbortController */
 /*
  * Custom Adobe Edge analytics for MCP tool calls.
  *
