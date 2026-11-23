@@ -1,4 +1,3 @@
-/* global fetch */
 /*
  * WKND shop (Adobe Commerce mock backend) access for the shop tools.
  *

@@ -1,4 +1,3 @@
-/* global fetch, AbortController, URLSearchParams */
 /*
  * Shared WKND data access for the adventure tools.
  *
