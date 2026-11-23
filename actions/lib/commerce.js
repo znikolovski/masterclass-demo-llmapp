@@ -597,6 +597,10 @@ const COUPON_MUTATION = `mutation ShopCoupon($input: ApplyCouponToCartInput!) {
 // No `reason`: ineligibility reasons describe shopper behaviour and are never forwarded.
 const OFFER_FIELDS = 'status coupon_code percent_off max_discount { value currency } expires_at saving { value currency } current_saving { value currency }';
 const OFFER_QUERY = `query ShopOffer($cartId: String!) { wkndRecoveryOffer(cart_id: $cartId) { ${OFFER_FIELDS} } }`;
+// Commerce's engine-selected climbing planner offer (same v1 fields; applied automatically, no
+// claim mutation). Read on Stage only, best effort, while the live audience wiring is validated.
+const GENERAL_OFFER_QUERY = 'query ShopPlannerOffer($cartId: String!) { wkndPlannerOffer(cart_id: $cartId) { status percent_off max_discount { value currency } expires_at saving { value currency } current_saving { value currency } } }';
+const GENERAL_OFFER_RESOURCES = ['https://28538-wkndsherpa-stage.adobeio-static.net/api/v1/web/llm-apps/mcp'];
 const SHIPPING_ADDRESS_MUTATION = `mutation ShopShipTo($input: SetShippingAddressesOnCartInput!) {
   setShippingAddressesOnCart(input: $input) { cart { id } }
 }`;
@@ -855,8 +859,15 @@ function offerDecision(raw, appliedCoupons = []) {
 /**
  * The offer to show with the cart. A failed lookup returns the explicit UNAVAILABLE state, and so
  * does a cart without a well-formed server revision token (the offer couldn't be changed safely).
+ * On Stage, Commerce's general offers are read alongside (see displayedOffer).
  */
 async function loadOffer(extra, shopper, cartId, appliedCoupons, serverVersion) {
+  const general = GENERAL_OFFER_RESOURCES.includes(verifiedResource(extra?.authInfo))
+    ? loadGeneralOffer(extra, shopper, cartId, serverVersion) : Promise.resolve(null);
+  return displayedOffer(await loadRecoveryOffer(extra, shopper, cartId, appliedCoupons, serverVersion), await general);
+}
+
+async function loadRecoveryOffer(extra, shopper, cartId, appliedCoupons, serverVersion) {
   if (!cartId) return offerDecision(null, appliedCoupons);
   if (!SERVER_VERSION.test(serverVersion || '')) return offerDecision(null, appliedCoupons);
   try {
@@ -867,6 +878,61 @@ async function loadOffer(extra, shopper, cartId, appliedCoupons, serverVersion) 
     if (e instanceof ShopError && ['shop_authentication_failed', 'shop_contract_unavailable'].includes(e.code)) throw e;
     return offerDecision(null, appliedCoupons);
   }
+}
+
+/* ---------------- general (audience-qualified) offers ---------------- */
+
+const PLANNER_UNAVAILABLE = 'The climbing planner offer can’t be checked right now, so no climbing discount is shown.';
+
+/**
+ * Commerce's climbing planner offer decoded with the v1 rules: ELIGIBLE/CLAIMED with valid
+ * same-currency savings and saving > current saving → shown (CLAIMED = engine-selected; once
+ * applied it appears as a cart totals discount instead); UNAVAILABLE or malformed → the explicit
+ * non-actionable state; anything else → null. Only display fields are kept (no audience, draft,
+ * provider or evidence fields), and the message is our own copy.
+ */
+function generalOfferDecision(raw) {
+  const kind = 'climbing_planner';
+  if (!raw || typeof raw !== 'object') return null;
+  const unavailable = { kind, status: 'UNAVAILABLE', message: PLANNER_UNAVAILABLE };
+  if (raw.status === 'UNAVAILABLE') return unavailable;
+  if (!['ELIGIBLE', 'CLAIMED'].includes(raw.status)) return null;
+  const saving = offerMoney(raw.saving);
+  const current = offerMoney(raw.current_saving);
+  if (!saving || !current || saving.currency !== current.currency) return unavailable;
+  if (!(saving.value > current.value)) return null;
+  const max = offerMoney(raw.max_discount);
+  return {
+    kind,
+    status: raw.status,
+    saving,
+    current_saving: current,
+    percent_off: num(raw.percent_off),
+    max_discount: max && max.currency === saving.currency ? max : null,
+    expires_at: text(raw.expires_at, 40) || null,
+  };
+}
+
+/** Commerce's general offer for the cart, or null; never fails the cart (best effort). */
+async function loadGeneralOffer(extra, shopper, cartId, serverVersion) {
+  if (!cartId || !SERVER_VERSION.test(serverVersion || '')) return null;
+  try {
+    const { data, errors } = await graphql(extra, GENERAL_OFFER_QUERY, { cartId }, { shopper, timeoutMs: OFFER_READ_TIMEOUT_MS });
+    return errors.length ? null : generalOfferDecision(data?.wkndPlannerOffer);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One offer slot per cart. Commerce picks the best saving; this only chooses what to show:
+ * the claimable welcome-back offer first, then an actionable general offer, then whichever
+ * explicit "can't be checked" state there is. The recovery code stays in the decision for redaction.
+ */
+function displayedOffer(recovery, general) {
+  const actionable = (o) => o && o.status !== 'UNAVAILABLE';
+  const offer = [recovery.offer, general].find(actionable) || recovery.offer || general || null;
+  return { ...recovery, offer };
 }
 
 function offerNotApplied(subcode, message, details = {}) {
@@ -921,6 +987,7 @@ async function removeOffer(extra, shopper, cartId, serverVersion) {
 }
 
 const formatDate = (iso) => {
+  if (!iso) return null;
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? null : new Intl.DateTimeFormat('en-AU', { day: 'numeric', month: 'short', year: 'numeric' }).format(d);
 };
@@ -928,6 +995,16 @@ const formatDate = (iso) => {
 /** Model-facing description of a displayable offer (no code, no eligibility reasons). */
 function offerText(offer) {
   if (!offer) return '';
+  if (offer.kind === 'climbing_planner') {
+    if (offer.status === 'UNAVAILABLE') return `${offer.message} Do not promise a climbing discount.`;
+    const ends = formatDate(offer.expires_at);
+    const terms = [
+      offer.percent_off !== null ? `${offer.percent_off}% off selected climbing gear` : null,
+      offer.max_discount ? `up to ${formatMoney(offer.max_discount)}` : null,
+      ends ? `ends ${ends}` : null,
+    ].filter(Boolean).join(', ');
+    return `A WKND climbing planner offer saves ${formatMoney(offer.saving)} on this cart${terms ? ` (${terms})` : ''}. WKND applies it automatically while the cart qualifies; there is nothing to claim, so do not call apply_offer for it.`;
+  }
   if (offer.status === 'UNAVAILABLE') return `${offer.message} Do not promise a welcome-back discount.`;
   const ends = formatDate(offer.expires_at);
   const terms = [
@@ -976,6 +1053,8 @@ module.exports = {
   applyOffer,
   removeOffer,
   offerDecision,
+  generalOfferDecision,
+  displayedOffer,
   offerText,
   hideProtectedCoupons,
   maskCodes,
@@ -993,6 +1072,7 @@ module.exports = {
     EMAIL_MUTATION,
     COUPON_MUTATION,
     OFFER_QUERY,
+    GENERAL_OFFER_QUERY,
     APPLY_OFFER_MUTATION,
     REMOVE_OFFER_MUTATION,
     SHIPPING_ADDRESS_MUTATION,
