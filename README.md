@@ -545,12 +545,13 @@ current cart. `place-shop-demo-order` reports an offer that stopped being
 valid as `offer_invalid` with the current cart. Email consent is never changed here; shoppers manage
 it at `https://wknd-adventures.run.place/account`.
 
-### Climbing planner offer (general offer, Stage only)
+### Climbing planner offer (general offer)
 
-On **Stage only**, `get-shop-cart` and `prepare-shop-checkout` also read Commerce's
+On **Stage and Production**, `get-shop-cart` and `prepare-shop-checkout` also read Commerce's
 engine-selected `wkndPlannerOffer(cart_id)`, which has the same fields as `wkndRecoveryOffer`
 without a code. It is read in parallel and best effort: if the field is missing or fails, the cart
-and the welcome-back result are unchanged. Production never sends the query.
+and the welcome-back result are unchanged. The resource must match the verified Stage or
+Production MCP deployment; Commerce owns audience qualification and offer activation.
 - It is decoded with the v1 rules into `offer` `{ kind: 'climbing_planner', status, saving,
   current_saving, percent_off, max_discount, expires_at }`. UNAVAILABLE or malformed money gives
   the non-actionable state with our own message. Audience, draft, provider and evidence fields

@@ -598,9 +598,12 @@ const COUPON_MUTATION = `mutation ShopCoupon($input: ApplyCouponToCartInput!) {
 const OFFER_FIELDS = 'status coupon_code percent_off max_discount { value currency } expires_at saving { value currency } current_saving { value currency }';
 const OFFER_QUERY = `query ShopOffer($cartId: String!) { wkndRecoveryOffer(cart_id: $cartId) { ${OFFER_FIELDS} } }`;
 // Commerce's engine-selected climbing planner offer (same v1 fields; applied automatically, no
-// claim mutation). Read on Stage only, best effort, while the live audience wiring is validated.
+// claim mutation). Read best effort on the verified Stage and Production deployments.
 const GENERAL_OFFER_QUERY = 'query ShopPlannerOffer($cartId: String!) { wkndPlannerOffer(cart_id: $cartId) { status percent_off max_discount { value currency } expires_at saving { value currency } current_saving { value currency } } }';
-const GENERAL_OFFER_RESOURCES = ['https://28538-wkndsherpa-stage.adobeio-static.net/api/v1/web/llm-apps/mcp'];
+const GENERAL_OFFER_RESOURCES = [
+  'https://28538-wkndsherpa-stage.adobeio-static.net/api/v1/web/llm-apps/mcp',
+  MCP_RESOURCE,
+];
 const SHIPPING_ADDRESS_MUTATION = `mutation ShopShipTo($input: SetShippingAddressesOnCartInput!) {
   setShippingAddressesOnCart(input: $input) { cart { id } }
 }`;
