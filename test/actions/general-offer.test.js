@@ -1,4 +1,4 @@
-// General (audience-qualified) offers: Stage-only, best-effort consumer of Commerce's decision.
+// General (audience-qualified) offers: best-effort consumer of Commerce's decision.
 jest.mock('../../actions/lib/analytics.js', () => ({ withAnalytics: (_name, handler) => handler }))
 
 const getCart = require('../../actions/get-shop-cart/index.js')
@@ -82,16 +82,17 @@ describe('general offers', () => {
         }
     })
 
-    test('Production never asks for general offers', async () => {
-        fakeCommerce(routes(recovery(), () => { throw new Error('must not be called') }))
+    test('Production reads the same server-selected offer without internal metadata', async () => {
+        fakeCommerce(routes(recovery(), () => ({ data: { wkndPlannerOffer: planner() } })))
         const result = await getCart({}, shopper())
-        expect(result.structuredContent.offer).toBeNull()
-        expect(global.fetch.calls.map((c) => c.operation)).not.toContain('ShopPlannerOffer')
+        expect(result.structuredContent.offer).toEqual(PLANNER_DTO)
+        expect(global.fetch.calls.map((c) => c.operation)).toContain('ShopPlannerOffer')
+        expect(JSON.stringify(result)).not.toMatch(/RECOVER10|audience_key|draft_id/)
     })
 
-    test('checkout shows the same decision', async () => {
+    test.each([stageShopper, shopper])('checkout shows the same decision for supported deployments', async (context) => {
         fakeCommerce(routes(recovery(), () => ({ data: { wkndPlannerOffer: planner() } })))
-        const result = await prepare({}, stageShopper())
+        const result = await prepare({}, context())
         expect(result.structuredContent.offer).toEqual(PLANNER_DTO)
     })
 
