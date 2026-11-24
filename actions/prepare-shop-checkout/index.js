@@ -2,7 +2,7 @@
 // address (new or saved), delivery method and coupon. Never places an order.
 const {
   requireShopper, loadCart, assertVersion, graphql, failure, ShopError, formatMoney, text,
-  loadOffer, applyOffer, removeOffer, offerText, hideProtectedCoupons, maskCodes, sanitizeOutput,
+  loadOffer, restorePersonBinding, applyOffer, removeOffer, offerText, hideProtectedCoupons, maskCodes, sanitizeOutput,
   throwIfCartChanged,
   queries, constants,
 } = require('../lib/commerce.js');
@@ -200,6 +200,7 @@ const handler = async (args = {}, extra) => {
       : { code: null, offer: null };
     hideProtectedCoupons(cart, [decision.code]);
     const note = offerText(decision.offer);
+    const personBinding = await restorePersonBinding(extra);
     return sanitizeOutput({
       content: [{ type: 'text', text: note ? `${checkoutText(cart, warnings)} ${note}` : checkoutText(cart, warnings) }],
       structuredContent: {
@@ -211,6 +212,7 @@ const handler = async (args = {}, extra) => {
         warnings,
         notice: constants.DEMO_NOTICE,
       },
+      ...(personBinding ? { _meta: { wkndPersonBinding: personBinding } } : {}),
     }, [decision.code]);
   } catch (error) {
     // Steps already applied stay applied; show the shopper the cart as it now is.

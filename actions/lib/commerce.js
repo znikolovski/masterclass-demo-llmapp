@@ -17,6 +17,8 @@ const IDENTITY_ISSUER = 'https://dev-g4kzp3zwgwzs8oha.us.auth0.com/';
 const SHOP_SCOPE = 'shop:cart';
 const DELEGATION_AUDIENCE = 'urn:wknd-commerce:storefront';
 const DEFAULT_GRAPHQL_URL = 'https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce/storefront-graphql';
+const PERSON_ENDPOINT = 'https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce/target-diagnostic';
+const PERSON_FRESHNESS_MS = 300000;
 const DM_ASSET_PREFIX = /^https:\/\/delivery-p\d+-e\d+\.adobeaemcloud\.com\/adobe\/assets\/urn:aaid:aem:[0-9a-f-]+$/i;
 const SITE_HOST = 'wknd-adventures.run.place';
 // A cold Commerce container loads its catalog snapshot first: ~13 s measured from a distant Runtime
@@ -168,6 +170,83 @@ function assertion(shopper, extra, orderExpect) {
   };
   const unsigned = `${encode({ alg: 'HS256', typ: 'JWT' })}.${encode(payload)}`;
   return `${unsigned}.${createHmac('sha256', secret).update(unsigned).digest('base64url')}`;
+}
+
+/** Accept only the published Production idLinkage lease, never a caller-provided identity. */
+function personBindingFrom(dto, now = Date.now()) {
+  const binding = dto?.binding;
+  if (dto?.environment !== 'production' || dto.evidence !== false
+    || dto.financialAuthorization !== false || dto.apiVersion !== 'wknd.person-binding/v1'
+    || dto.purpose !== 'idLinkage' || dto.status !== 'ok' || dto.consent !== 'granted'
+    || dto.reason !== undefined || !Array.isArray(dto.semanticAllowlist)
+    || dto.semanticAllowlist.length !== 0 || !binding) return null;
+  const fixed = {
+    source: 'server-issued',
+    purpose: 'idLinkage',
+    environment: 'production',
+    runtimeNamespace: '28538-wkndcommerce',
+    orgId: '28260E2056581D3B7F000101@AdobeOrg',
+    dpid: '1547309',
+    namespace: 'wkndCustomerId',
+    issuer: PERSON_ENDPOINT,
+    freshnessMs: PERSON_FRESHNESS_MS,
+  };
+  if (['personAlias', 'consentGeneration', 'issuedAt', 'expiresAt']
+    .some((key) => typeof binding[key] !== 'string')
+    || Object.entries(fixed).some(([key, value]) => binding[key] !== value)
+    || !/^wpa_[0-9a-f]{32}$/.test(binding.personAlias)
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(binding.consentGeneration)) return null;
+  const issued = Date.parse(binding.issuedAt);
+  const expires = Date.parse(binding.expiresAt);
+  if (!Number.isFinite(issued) || !Number.isFinite(expires)
+    || new Date(issued).toISOString() !== binding.issuedAt
+    || new Date(expires).toISOString() !== binding.expiresAt
+    || expires - issued !== PERSON_FRESHNESS_MS || issued > now || now >= expires) return null;
+  return {
+    ...fixed,
+    personAlias: binding.personAlias,
+    consentGeneration: binding.consentGeneration,
+    issuedAt: binding.issuedAt,
+    expiresAt: binding.expiresAt,
+  };
+}
+
+async function readPersonBinding(extra, op) {
+  if (!['person-status', 'person-binding'].includes(op)) return null;
+  try {
+    const principal = requireShopper(extra);
+    if (verifiedResource(extra?.authInfo) !== MCP_RESOURCE) return null;
+    const response = await fetch(PERSON_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'Cache-Control': 'no-store',
+        'X-WKND-Delegation': 'mcp',
+        Authorization: `Bearer ${assertion(principal, extra)}`,
+      },
+      body: JSON.stringify({ op }),
+      cache: 'no-store',
+      redirect: 'error',
+      signal: AbortSignal.timeout(OFFER_READ_TIMEOUT_MS),
+    });
+    if (!response.ok) return null;
+    return personBindingFrom(await response.json());
+  } catch {
+    return null;
+  }
+}
+
+/** Restore only an existing grant, then recheck its authoritative alias and generation. */
+async function restorePersonBinding(extra) {
+  const before = await readPersonBinding(extra, 'person-binding');
+  if (!before) return null;
+  const after = await readPersonBinding(extra, 'person-status');
+  if (!after || after.personAlias !== before.personAlias
+    || after.consentGeneration !== before.consentGeneration
+    || Date.now() >= Date.parse(before.expiresAt)
+    || Date.now() >= Date.parse(after.expiresAt)) return null;
+  return after;
 }
 
 /**
@@ -1037,6 +1116,8 @@ module.exports = {
   ShopError,
   failure,
   requireShopper,
+  personBindingFrom,
+  restorePersonBinding,
   graphql,
   ensureNoErrors,
   throwIfCartChanged,

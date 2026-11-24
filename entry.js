@@ -25,6 +25,7 @@ governing permissions and limitations under the License.
 
 const { createMain } = require('@adobe/llm-apps-runtime')
 const { dropEdsWidgetDomains } = require('./actions/lib/resource-meta.js')
+const { disableCustomerEdgeEvents } = require('./actions/lib/analytics.js')
 
 // webpack resolves these at compile time relative to this file's directory.
 // The resulting context objects are passed to the runtime — it never calls
@@ -35,5 +36,6 @@ const htmlContext   = require.context('./actions', true, /widget\.html$/)
 let actionsConfig = {}
 try { actionsConfig = require('./actions.json') } catch (e) { /* no actions.json at build time */ }
 dropEdsWidgetDomains(actionsConfig)
+disableCustomerEdgeEvents(actionsConfig)
 
 module.exports = createMain({ moduleContext, htmlContext, actionsConfig })
