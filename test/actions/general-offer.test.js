@@ -90,6 +90,36 @@ describe('general offers', () => {
         expect(JSON.stringify(result)).not.toMatch(/RECOVER10|audience_key|draft_id/)
     })
 
+    test.each([getCart, prepare])('Production restores only a server lease in private metadata without changing offers', async (handler) => {
+        fakeCommerce(routes(recovery(), () => ({ data: { wkndPlannerOffer: planner() } })))
+        const commerceFetch = global.fetch
+        const now = Date.now()
+        const binding = {
+            source: 'server-issued', purpose: 'idLinkage', personAlias: `wpa_${'a'.repeat(32)}`,
+            environment: 'production', runtimeNamespace: '28538-wkndcommerce',
+            orgId: '28260E2056581D3B7F000101@AdobeOrg', dpid: '1547309', namespace: 'wkndCustomerId',
+            issuer: 'https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce/target-diagnostic',
+            consentGeneration: '11111111-1111-4111-8111-111111111111',
+            issuedAt: new Date(now).toISOString(), expiresAt: new Date(now + 300000).toISOString(), freshnessMs: 300000,
+        }
+        const personCalls = []
+        global.fetch = async (url, options) => {
+            if (url !== binding.issuer) return commerceFetch(url, options)
+            personCalls.push(JSON.parse(options.body))
+            return { ok: true, json: async () => ({
+                environment: 'production', evidence: false, financialAuthorization: false,
+                apiVersion: 'wknd.person-binding/v1', purpose: 'idLinkage', semanticAllowlist: [],
+                status: 'ok', consent: 'granted', binding,
+            }) }
+        }
+        const result = await handler({}, shopper())
+        expect(personCalls).toEqual([{ op: 'person-binding' }, { op: 'person-status' }])
+        expect(result._meta.wkndPersonBinding).toEqual(binding)
+        expect(result.structuredContent.offer).toEqual(PLANNER_DTO)
+        expect(JSON.stringify(result.structuredContent)).not.toMatch(/wpa_|consentGeneration|auth0/)
+        expect(result.content[0].text).not.toContain(binding.personAlias)
+    })
+
     test.each([stageShopper, shopper])('checkout shows the same decision for supported deployments', async (context) => {
         fakeCommerce(routes(recovery(), () => ({ data: { wkndPlannerOffer: planner() } })))
         const result = await prepare({}, context())

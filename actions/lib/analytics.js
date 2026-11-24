@@ -1,5 +1,11 @@
 /*
- * Custom Adobe Edge analytics for MCP tool calls.
+ * Optional Adobe Edge payload inspection for MCP tool calls.
+ *
+ * Customer collection is disabled: the current runtime exposes no verified explicit collection
+ * consent signal. No live or backdated call sends to Edge. The existing dry-run builder remains
+ * available for local inspection, without synthetic pageviews. Auth, scopes, host sessions and
+ * idLinkage leases are not collection consent. entry.js also sets sendsEdgeEvent:false on the
+ * UI-generated action metadata so the runtime cannot send its automatic customer Edge events.
  *
  * The installed @adobe/llm-apps-runtime (v1.1.5 — also the latest published
  * version) sends its own automatic Edge event per tool call, but its XDM
@@ -13,13 +19,7 @@
  * reimplements the small interact() call itself rather than deep-importing
  * package internals.
  *
- * This sends ONE full event per tool call carrying every field the wiki's
- * step-4 mapping expects. It is meant to fully REPLACE the runtime's own
- * automatic Edge event for a given action (set `sendsEdgeEvent: false` on
- * that action in actions.json) — sending both would double-count every
- * tool call as two Analytics hits (Adobe Analytics only counts a hit when
- * an event carries a page-view/link-click signal, and both events would
- * carry one).
+ * Historical field mappings below are retained only for dry-run inspection.
  *
  * Trade-off versus the runtime's own event: this does not attempt to
  * replicate its per-host identity/locale extraction (hostOrganization,
@@ -56,8 +56,8 @@
  * (delete the FALLBACK_* constants and the `||` below) once the UI supports it.
  */
 
-const FETCH_TIMEOUT_MS = 3000;
-const EDGE_INTERACT_HOST = 'edge.adobedc.net';
+// No verified collection-consent signal is available in the runtime contract.
+// Keep optional customer telemetry off; dry-run payload inspection is local only.
 
 const FALLBACK_DATASTREAM_ID = '56dee4fc-21a9-4e37-83ab-bdd874957aba';
 const FALLBACK_ORG_ID = '28260E2056581D3B7F000101@AdobeOrg';
@@ -109,8 +109,7 @@ function hostSessionFromExtra(extra) {
 }
 
 /**
- * Send one MCP tool-call event to Adobe Edge with the full field set.
- * Fails silently (never throws) so analytics can never break a tool call.
+ * Build a dry-run MCP payload. All non-dry-run calls fail closed without network access.
  * @param {object} [extra] handler `extra` arg (read for config + host session)
  * @param {object} fields
  * @param {string} fields.toolName
@@ -129,6 +128,7 @@ function hostSessionFromExtra(extra) {
  * @returns {Promise<{sent:boolean,status?:number,ecid?:string,error?:string,body?:object}|null>}
  */
 async function sendMcpAnalyticsEvent(extra, fields, options = {}) {
+  if (!options.dryRun) return { sent: false, reason: 'collection-consent-unavailable' };
   const cfg = readAnalyticsConfig(extra);
   if (!cfg) return null;
 
@@ -157,10 +157,6 @@ async function sendMcpAnalyticsEvent(extra, fields, options = {}) {
   const xdm = {
     eventType: 'mcp.tool_call',
     timestamp: new Date(options.timestamp ?? Date.now()).toISOString(),
-    // Required for Adobe Analytics to count this as a hit (Occurrences), not
-    // just an AEP dataset row — see wrapHandlerWithEdge's own comment on the
-    // same requirement for its automatic event.
-    web: { webPageDetails: { name: `mcp:${toolName}`, pageViews: { value: 1 } } },
     [cfg.xdmTenant]: { mcp },
   };
 
@@ -205,42 +201,14 @@ async function sendMcpAnalyticsEvent(extra, fields, options = {}) {
   const data = { __adobe: { analytics: analyticsVars } };
   const body = { event: { xdm, data } };
   if (options.fetchEcid) body.query = { identity: { fetch: ['ECID'] } };
-  if (options.dryRun) return { sent: false, body };
+  return { sent: false, body };
+}
 
-  const url = `https://${EDGE_INTERACT_HOST}/ee/v2/interact?dataStreamId=${encodeURIComponent(cfg.datastreamId)}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  const quiet = Boolean(options.timestamp || options.ecid);
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      const errorBody = await response.text().catch(() => '<unreadable body>');
-      // TEMP DEBUG — remove once processing-rule mapping is confirmed working.
-      if (!quiet) console.error('[analytics] edge interact rejected', response.status, errorBody);
-      return {
-        sent: false, status: response.status, error: errorBody, body,
-      };
-    }
-    // TEMP DEBUG — remove once processing-rule mapping is confirmed working.
-    if (!quiet) console.log('[analytics] edge interact accepted', response.status);
-    const responseBody = typeof response.json === 'function' ? await response.json().catch(() => null) : null;
-    return {
-      sent: true, status: response.status, ecid: ecidFromEdgeResponse(responseBody) || options.ecid,
-      handles: responseBody?.handle, body,
-    };
-  } catch (err) {
-    // TEMP DEBUG — remove once processing-rule mapping is confirmed working.
-    if (!quiet) console.error('[analytics] edge interact request failed', err && err.message);
-    // fail-soft — analytics must never affect the tool call
-    return { sent: false, error: (err && err.message) || 'request failed', body };
-  } finally {
-    clearTimeout(timer);
-  }
+/** Apply the runtime's existing per-action opt-out to UI-generated metadata. */
+function disableCustomerEdgeEvents(actionsConfig) {
+  (actionsConfig?.actions || []).forEach((action) => {
+    if (action && typeof action === 'object') action.sendsEdgeEvent = false;
+  });
 }
 
 function ecidFromEdgeResponse(responseBody) {
@@ -254,12 +222,8 @@ function ecidFromEdgeResponse(responseBody) {
 }
 
 /**
- * Wrap an MCP action handler so every call reports full analytics to Adobe
- * Edge (status, error class, duration, sizes, method, user intent) —
- * preserves the handler's exact (args, extra) => result contract; sending
- * is awaited (bounded by FETCH_TIMEOUT_MS) so it isn't dropped by the
- * platform freezing the container right after the response is returned,
- * Discovery results additionally carry private journey/Edge handoff metadata.
+ * Preserve the handler calling contract and local dry-run instrumentation.
+ * Live discovery correlation is not an identity or a qualification event.
  * @param {string} toolName
  * @param {(args: object, extra?: object) => Promise<object>} handler
  * @returns {(args: object, extra?: object) => Promise<object>}
@@ -352,6 +316,7 @@ async function invokeWithAnalytics(toolName, handler, args, extra, options = {})
 }
 
 module.exports = {
+  disableCustomerEdgeEvents,
   withAnalytics,
   invokeWithAnalytics,
   sendMcpAnalyticsEvent,

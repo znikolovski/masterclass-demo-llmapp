@@ -6,6 +6,102 @@ const {
 
 const { requireShopper, graphql, normalizeProduct, normalizeCart, resolveOptions, ShopError } = commerce
 
+describe('Production person binding', () => {
+    const endpoint = 'https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce/target-diagnostic'
+    const now = Date.parse('2026-11-24T00:00:00.000Z')
+    const granted = () => ({
+        environment: 'production', evidence: false, financialAuthorization: false,
+        apiVersion: 'wknd.person-binding/v1', purpose: 'idLinkage', semanticAllowlist: [],
+        status: 'ok', consent: 'granted',
+        binding: {
+            source: 'server-issued', purpose: 'idLinkage',
+            personAlias: `wpa_${'a'.repeat(32)}`, environment: 'production',
+            runtimeNamespace: '28538-wkndcommerce', orgId: '28260E2056581D3B7F000101@AdobeOrg',
+            dpid: '1547309', namespace: 'wkndCustomerId', issuer: endpoint,
+            consentGeneration: '11111111-1111-4111-8111-111111111111',
+            issuedAt: new Date(now).toISOString(),
+            expiresAt: new Date(now + 300000).toISOString(), freshnessMs: 300000,
+        },
+    })
+    const originalFetch = global.fetch
+    beforeEach(() => { jest.spyOn(Date, 'now').mockReturnValue(now + 1) })
+    afterEach(() => { global.fetch = originalFetch; jest.restoreAllMocks() })
+
+    test('uses fresh existing Commerce signatures, never the MCP bearer, and status never mints', async () => {
+        global.fetch = jest.fn().mockImplementation(async () => ({ ok: true, json: async () => granted() }))
+        const binding = await commerce.restorePersonBinding(shopper())
+        expect(binding).toEqual(granted().binding)
+        expect(global.fetch.mock.calls.map(([url, options]) => [url, JSON.parse(options.body)]))
+            .toEqual([[endpoint, { op: 'person-binding' }], [endpoint, { op: 'person-status' }]])
+        const claims = global.fetch.mock.calls.map(([, options]) => {
+            expect(options).toMatchObject({ cache: 'no-store', redirect: 'error' })
+            expect(options.headers['X-WKND-Delegation']).toBe('mcp')
+            expect(JSON.stringify(options)).not.toContain('private-mcp-access-token')
+            const [header, payload, signature] = options.headers.Authorization.slice(7).split('.')
+            expect(signature).toBe(createHmac('sha256', SECRET).update(`${header}.${payload}`).digest('base64url'))
+            return JSON.parse(Buffer.from(payload, 'base64url'))
+        })
+        expect(claims[0]).toMatchObject({ iss: MCP_RESOURCE, aud: 'urn:wknd-commerce:storefront', sub: SUB, identity_issuer: ISSUER, scope: 'shop:cart' })
+        expect(claims[0].jti).not.toBe(claims[1].jti)
+        expect(claims[0].exp - claims[0].iat).toBe(60)
+        expect(Number.isInteger(claims[0].iat)).toBe(true)
+        expect(claims[0].iat).toBeLessThanOrEqual(Math.floor(Date.now() / 1000))
+    })
+
+    test.each([
+        ['orgId', 'foreign-org'], ['dpid', 1547309], ['namespace', 'ECID'],
+        ['runtimeNamespace', '28538-wkndcommerce-stage'], ['purpose', 'collection'],
+        ['issuer', 'https://example.com'], ['source', 'caller-issued'],
+        ['personAlias', 'auth0|private'], ['personAlias', [`wpa_${'a'.repeat(32)}`]],
+        ['consentGeneration', '<ACTUALservergrantUUID>'], ['freshnessMs', 600000],
+        ['expiresAt', new Date(now + 300001).toISOString()], ['issuedAt', null],
+    ])('rejects malformed or foreign binding %s', (key, value) => {
+        const dto = granted()
+        dto.binding[key] = value
+        expect(commerce.personBindingFrom(dto)).toBeNull()
+    })
+
+    test('enforces the exact lease interval and envelope without assuming consent', () => {
+        expect(commerce.personBindingFrom(granted(), now - 1)).toBeNull()
+        expect(commerce.personBindingFrom(granted(), now)).not.toBeNull()
+        expect(commerce.personBindingFrom(granted(), now + 300000)).toBeNull()
+        for (const override of [
+            { consent: undefined }, { consent: 'withdrawn', binding: null },
+            { consent: 'absent', binding: null }, { status: 'unavailable', reason: 'alias-not-approved', binding: null },
+            { semanticAllowlist: ['planning'] }, { purpose: 'collection' }, { evidence: true },
+            { financialAuthorization: true }, { reason: null },
+        ]) expect(commerce.personBindingFrom({ ...granted(), ...override })).toBeNull()
+    })
+
+    test.each(['alias', 'generation', 'withdrawal', 'expiry'])('drops a restored lease after %s changes', async (change) => {
+        global.fetch = jest.fn().mockImplementation(async () => ({ ok: true, json: async () => granted() }))
+        global.fetch.mockImplementationOnce(async () => ({ ok: true, json: async () => granted() }))
+        global.fetch.mockImplementationOnce(async () => {
+            const dto = granted()
+            if (change === 'alias') dto.binding.personAlias = `wpa_${'b'.repeat(32)}`
+            if (change === 'generation') dto.binding.consentGeneration = '22222222-2222-4222-8222-222222222222'
+            if (change === 'withdrawal') { dto.consent = 'withdrawn'; dto.binding = null }
+            if (change === 'expiry') Date.now.mockReturnValue(now + 300000)
+            return { ok: true, json: async () => dto }
+        })
+        expect(await commerce.restorePersonBinding(shopper())).toBeNull()
+    })
+
+    test('auth/config failures do not mint or request identity from arbitrary headers', async () => {
+        global.fetch = jest.fn()
+        for (const extra of [
+            {}, { __ow_headers: { authorization: 'Bearer arbitrary' } },
+            shopper({ scopes: [] }), shopper({ expiresAt: 1 }),
+            { ...shopper(), variables: {} },
+            shopper({ resource: 'https://28538-wkndsherpa-stage.adobeio-static.net/api/v1/web/llm-apps/mcp' }),
+        ]) expect(await commerce.restorePersonBinding(extra)).toBeNull()
+        expect(global.fetch).not.toHaveBeenCalled()
+        global.fetch.mockResolvedValue({ ok: false, status: 403 })
+        expect(await commerce.restorePersonBinding(shopper())).toBeNull()
+        expect(global.fetch).toHaveBeenCalledTimes(1)
+    })
+})
+
 describe('requireShopper', () => {
     test('accepts a verified, scoped, unexpired WKND shopper', () => {
         expect(requireShopper(shopper())).toMatchObject({ sub: SUB, email: 'sam@example.com' })

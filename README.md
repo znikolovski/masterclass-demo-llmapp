@@ -564,6 +564,26 @@ Production MCP deployment; Commerce owns audience qualification and offer activa
 - Live AAM qualification is validated separately. A planner offer shown here is Commerce's demo
   decision, not verified audience membership.
 
+### Production person binding
+
+Successful Production cart and checkout reads also restore an existing authoritative `idLinkage`
+grant through `target-diagnostic` (`wknd.person-binding/v1`, live 0.0.5). Each request reuses the
+Commerce assertion signer with a fresh single-use signature; the runtime-verified shopper principal
+is required. The MCP access token is never forwarded as a direct ShopperToken.
+
+The only operations are `person-binding`, followed by a no-store `person-status` recheck. Neither
+creates consent. Only the exact Production server-issued lease is accepted: canonical org/DPID/
+namespace/issuer, `wpa_` alias, UUID consent generation, and UTC millisecond timestamps with an exact
+five-minute lifetime. Alias or generation changes, withdrawal, expiry, malformed responses, or auth/
+configuration failures discard the binding without changing cart totals or offer behavior.
+
+The validated lease is returned only in private `_meta.wkndPersonBinding`, not model text or
+`structuredContent`. No lease is cached across calls. A returned lease is not continuing-consent
+proof: acting clients must clear it on withdrawal and expire it locally; another client's lease can
+remain bounded by its five-minute expiry. No upstream deletion or realtime AAM removal is promised.
+`semanticAllowlist` remains empty: there is no event adapter, membership claim, financial
+authorization, consent writer, or delegated withdrawal operation.
+
 LLM Apps UI (both Stage and Production, then redeploy): on `prepare-shop-checkout` add two
 properties, each type **Boolean**, not required:
 
@@ -624,17 +644,27 @@ items and `ranked` on the structured result. Download the updated `actions.json`
 for local MCP validation, deploy the handler, and refresh the host's tool discovery
 so it no longer caches the old required-input schema.
 
-The six WKND adventure actions are wrapped by `actions/lib/analytics.js`. Each invocation sends one server-side event to Adobe Edge Network using the WKND datastream. It includes a virtual page view (`mcp:<action-name>`) so Adobe Analytics counts the action, and records status, duration, input/output byte sizes, and selected host context. Tool arguments and outputs are not serialized into the event; only their byte sizes are sent, except optional `userIntent`, which is capped at 255 UTF-8 bytes.
+Optional customer analytics is **OFF**. The runtime contract currently provides no verified explicit
+collection-consent signal; login, cart scope, host/session metadata, caller headers and an `idLinkage`
+grant are not collection consent. `actions/lib/analytics.js` sends no live or backdated Edge requests
+and preserves tool results. Synthetic `xdm.web.webPageDetails`/`pageViews` were removed.
 
-The event sends XDM under the datastream's custom tenant namespace (with the required leading `_`) and Analytics variables under `event.data.__adobe.analytics` for direct eVar/event mapping. The POC falls back to the non-secret datastream ID, IMS organization ID, and XDM tenant in `actions/lib/analytics.js` because the LLM Apps UI does not currently expose these variables; `WKND_ANALYTICS_DATASTREAM_ID`, `WKND_ANALYTICS_ORG_ID`, and `WKND_ANALYTICS_XDM_TENANT` override them when available.
+The existing payload builder and mappings remain available for local dry-run inspection only.
+Datastream variables or fallback configuration do not enable collection.
 
-For reportable data, verify that the datastream routes to the intended Adobe Analytics report suite, its XDM schema includes the custom tenant field group, and the module's eVar/event slots and numeric event types are configured there. If the app also enables the LLM Apps runtime's built-in Edge event, set `sendsEdgeEvent: false` for these actions to avoid duplicate page-view hits. The custom sender is awaited, fail-soft, and bounded to three seconds so tracking failures do not fail a tool call.
+Before runtime registration, `entry.js` applies `sendsEdgeEvent: false` to every UI-generated action
+using the runtime's existing opt-out. This prevents its automatic customer Edge event from bypassing
+the disabled custom sender; other tool metadata, Variables and authentication are unchanged.
 
 ### Backfilling a week of report data
 
-`npm run simulate:analytics -- --dry-run` previews a backfill without sending it; drop `--dry-run` to send. Options: `--days=7`, `--sessions-per-day=40`, `--concurrency=4`, and `--seed=42`. The script executes the real action handlers against the live WKND catalogue through the same analytics wrapper as production. Status, duration, sizes, and payload shape are therefore measured; only the event timestamp is backdated. Conversations follow weighted tool journeys spread across UTC hours, and each one reuses the ECID returned by Edge so visits and visitors stitch correctly.
+`npm run simulate:analytics -- --dry-run` can inspect local payloads but still executes handlers and
+can contact their data providers. Do not run it as qualification evidence. Dropping `--dry-run` does
+not enable Edge collection; backdated timestamps, ECIDs and simulated host sessions cannot grant
+consent.
 
-The Analytics report suite must use **Timestamps optional** or **Timestamps required**; otherwise backdated hits are dropped. Simulated ChatGPT sessions use `sim-` session IDs (`eVar11`). Simulated non-ChatGPT sessions have no session ID, matching production, so they cannot be separated from real traffic. Re-running the script adds more hits, and Adobe Analytics data can take up to about 90 minutes to appear.
+Generated kit/briefing output, planning engagement and private discovery correlation are not
+approved AAM qualification events. No new event names, report-suite slots or audiences were added.
 
 ## `content` vs `structuredContent`
 
