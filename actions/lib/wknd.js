@@ -462,20 +462,23 @@ async function loadAttributes(extra) {
 }
 
 /**
- * Real flight search for the access/logistics portion of permit planning.
+ * WKND Aero demo flight search for logistics and checkout handoffs.
  * @param {object} extra
- * @param {{from?: string, to: string, date?: string}} params
+ * @param {{from?: string, to: string, date?: string, passengers?: number}} params
+ * @param {{strict?: boolean}} options Throw on upstream failure for interactive searches.
  * @returns {Promise<any|null>}
  */
-async function searchFlights(extra, params) {
+async function searchFlights(extra, params, { strict = false } = {}) {
   const base = getVar(extra, 'WKND_CATALOG_BASE');
   const qs = new URLSearchParams();
-  if (isSet(params.from)) qs.set('from', params.from);
-  if (isSet(params.to)) qs.set('to', params.to);
-  if (isSet(params.date)) qs.set('date', params.date);
+  if (isSet(params.from)) qs.set('origin', params.from);
+  if (isSet(params.to)) qs.set('dest', params.to);
+  if (isSet(params.date)) qs.set('depart', params.date);
+  if (params.passengers !== undefined) qs.set('passengers', String(params.passengers));
   try {
     return await fetchJson(`${base}/api/flights/search?${qs.toString()}`);
-  } catch {
+  } catch (error) {
+    if (strict) throw new Error('WKND Aero flight search is unavailable. Please try again.', { cause: error });
     return null;
   }
 }
