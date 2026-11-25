@@ -80,6 +80,79 @@ git push origin your-branch
 
 The deploy pipeline clones your repo, fetches the latest metadata from the API, writes `actions.json`, runs `npm install && npm run build`, and deploys to I/O Runtime. You don't build or deploy manually.
 
+## Adventure flight search and Aero checkout
+
+`actions/search-flights/index.js` implements public **demo** flight search. Discovery
+and route-briefing widgets can request it using the selected `adventure_id`.
+The handler uses the published adventure's `destinationIata` gateway, never an
+airport inferred from prose. Without a mapping, the traveller must provide an
+explicit `destination`.
+
+Require the traveller's `origin` (three-letter airport code), exact `depart`
+(`YYYY-MM-DD`, today or later), and `passengers` (integer 1–6). Missing details
+return `needs-input`, without searching with Aero's defaults. Upstream failure is
+`unavailable`, not “no flights.” The current Aero API is a simulator: amounts are
+USD base fares per passenger, excluding tax and seat fees, not real airline
+inventory or ticketing.
+
+Each flight has a `booking_url` carrying route, date, traveller count, adventure
+and `flight_id`. Aero searches again and preselects the matching flight but stays
+on flight selection so the traveller reviews the **refreshed fare**. Booking
+creation remains in Aero's signed-in checkout. No MCP write scope, delegated
+booking token or new credential is introduced.
+
+Flight search also explains the **conditional flight-linked gear-kit offer**:
+it is not an airfare discount and is not granted by searching. Confirm an
+eligible booking and review/claim the offer on Aero's confirmation page first.
+The flight widget's **Check my gear discounts** action uses the existing
+authenticated `get-shop-cart` tool to show Commerce's current cart totals,
+applied discount labels/amounts and audience-qualified or welcome-back offers.
+It never estimates eligibility, adds percentages, claims an offer, applies a
+coupon or changes the cart. Users can continue into the existing Shop widget
+to explicitly review/apply an offer. Flight USD fares and Shop cart currency
+are labelled separately.
+
+### Required LLM Apps UI configuration (not source deployment)
+
+Create/configure the public `search-flights` action in the UI, using this handler.
+Suggested title: **Find WKND Aero flights**. Describe it as demo flight search
+with optional published adventure gateway resolution and an authenticated Aero
+checkout handoff. Ask for missing travel details rather than inventing them.
+
+Input properties:
+
+| Name | Type | Meaning |
+|---|---|---|
+| `adventure_id` | string, optional | Selected published WKND adventure |
+| `destination` | string, optional | Explicit arrival airport; required without a published gateway |
+| `origin` | string | Traveller-provided departure airport |
+| `depart` | string | Exact departure date |
+| `passengers` | integer, 1–6 | Confirmed traveller count |
+
+Allow partial input so `needs-input` can prompt for missing fields. Output is an
+object containing `status` (`needs-input`, `not-found`, `unavailable`, `ready`),
+`query`, `flights`, `currency: "USD"`, `demo: true`, `note`, and `discounts`
+(`status: "check-required"`, `cart_tool: "get-shop-cart"`, `message`). Each flight
+contains `id`, `origin`, `destination`, `departure_at`, `arrival_at`,
+`origin_time_zone`, `destination_time_zone`, `duration`, `cabin`, `aircraft`,
+`base_fare_per_person`, `base_fare_total`, `expires_at`, and `booking_url`.
+
+Set annotations to read-only/non-destructive and leave authentication optional
+for this public search only; **do not change existing booking or shop tools'
+authentication**. Disable the runtime's automatic Edge event for this action
+(`sendsEdgeEvent: false` in UI-managed metadata), because its handler uses the
+existing `withAnalytics` wrapper. Use the EDS `search-flights` widget at
+`https://main--masterclass-demo--znikolovski.aem.live/eds-widgets/search-flights`,
+with the same EDS embed/CSP configuration as the existing widgets.
+Allow the widget to invoke the existing `get-shop-cart` tool; that tool retains
+its own required authentication. Do not make public flight search authenticated
+merely to check discounts, and do not make cart access public.
+
+Publish the authored EDS widget page and configure UI metadata before enabling
+the feature. UI deployment requires main; select and verify **Stage** explicitly
+for acceptance first. Source, local tests, or a downloaded `actions.json` do not
+prove the configured tool is live.
+
 ## Authoring with Claude (optional)
 
 This repo ships a Claude skill at [`.claude/skills/llm-apps-action-author/`](.claude/skills/llm-apps-action-author/SKILL.md) that automates steps 1 and 4. Claude Code and Cursor auto-discover it when you open this repo.

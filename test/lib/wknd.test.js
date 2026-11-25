@@ -4,6 +4,26 @@ const { auditItems } = require('../../actions/audit-pack-weight/index.js');
 
 const { parseArticle, parseItinerary } = _internal;
 
+describe('Aero flight API contract', () => {
+  const originalFetch = global.fetch;
+  afterEach(() => { global.fetch = originalFetch; });
+  test('maps existing transport arguments to the actual Aero query parameters', async () => {
+    global.fetch = jest.fn(async () => ({ ok: true, json: async () => ({ flights: [] }) }));
+    const { searchFlights } = require('../../actions/lib/wknd.js');
+    await searchFlights({}, { from: 'MEL', to: 'PUQ', date: '2027-02-12', passengers: 2 }, { strict: true });
+    const url = new URL(global.fetch.mock.calls[0][0]);
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      origin: 'MEL', dest: 'PUQ', depart: '2027-02-12', passengers: '2',
+    });
+  });
+  test('strict flight searches fail explicitly while preserving existing optional logistics behavior', async () => {
+    global.fetch = jest.fn(async () => { throw new Error('Unavailable'); });
+    const { searchFlights } = require('../../actions/lib/wknd.js');
+    await expect(searchFlights({}, { to: 'PUQ' }, { strict: true })).rejects.toThrow('flight search is unavailable');
+    expect(await searchFlights({}, { to: 'PUQ' })).toBeNull();
+  });
+});
+
 describe('discovery page metadata', () => {
   test('reads authored metadata even when the query index is missing those fields', () => {
     const rec = { adventure_id: 'ohrid', category: 'general-outdoor' };
