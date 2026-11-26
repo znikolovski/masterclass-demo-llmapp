@@ -646,6 +646,18 @@ const CART_FIELDS = `
  */
 const CART_SELECTION = `${CART_FIELDS}\n  wknd_cart_version`;
 const CART_QUERY = `query ShopCart { customerCart { ${CART_SELECTION} } }`;
+const BUNDLE_OFFERS_QUERY = `query ShopFlightKitOffers($cartId: String!) {
+  wkndBundleOffers(cart_id: $cartId) { promotion_id bundle_id cart_version }
+}`;
+const COMPLETE_BUNDLE_MUTATION = `mutation ShopCompleteFlightKit(
+  $cartId: String!, $promotionId: String!, $bundleId: String!, $expected: String!
+) {
+  completeWkndBundle(cart_id: $cartId, promotion_id: $promotionId,
+    bundle_id: $bundleId, expected_cart_version: $expected) {
+    cart { ${CART_SELECTION} }
+    user_errors { code message }
+  }
+}`;
 const ADD_MUTATION = `mutation ShopAdd($cartId: String!, $items: [CartItemInput!]!) {
   addProductsToCart(cartId: $cartId, cartItems: $items) {
     cart { ${CART_SELECTION} }
@@ -1151,6 +1163,8 @@ module.exports = {
   imageUrl,
   queries: {
     CART_QUERY,
+    BUNDLE_OFFERS_QUERY,
+    COMPLETE_BUNDLE_MUTATION,
     ADD_MUTATION,
     UPDATE_MUTATION,
     EMAIL_MUTATION,

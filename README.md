@@ -104,6 +104,8 @@ booking token or new credential is introduced.
 Flight search also explains the **conditional flight-linked gear-kit offer**:
 it is not an airfare discount and is not granted by searching. Confirm an
 eligible booking and review/claim the offer on Aero's confirmation page first.
+Travellers can alternatively return to **Check Booking** and use the
+booking-linked offer tools below to claim that same entitlement in the LLM app.
 The flight widget's **Check my gear discounts** action uses the existing
 authenticated `get-shop-cart` tool to show Commerce's current cart totals,
 applied discount labels/amounts and audience-qualified or welcome-back offers.
@@ -147,6 +149,53 @@ with the same EDS embed/CSP configuration as the existing widgets.
 Allow the widget to invoke the existing `get-shop-cart` tool; that tool retains
 its own required authentication. Do not make public flight search authenticated
 merely to check discounts, and do not make cart access public.
+
+### Booking-linked offer claims and one-click gear kit
+
+After Aero confirms the booking, use its reference with **Check Booking**.
+The widget can read the same Commerce offer, explicitly claim it, and then
+**Add kit to cart**. This last button adds all missing components together
+through the existing `completeWkndBundle` atomic cart operation, not three
+model-generated product-add calls. Existing kit quantities are not duplicated.
+Claiming alone never creates or edits a cart, buys gear, or changes the flight.
+
+Commerce still owns booking verification, seven-day eligibility, the exact kit,
+stock, current prices, the single winning discount and redemption. If a better
+promotion wins or the kit is unavailable, one-click completion fails visibly
+without forcing the flight offer or falling back to partial additions.
+The mutation's actual cart totals and discount labels/amounts are returned
+immediately, including for text-only hosts. No local 50% calculation is used.
+
+Create these UI-managed tools after the source/website and Commerce update
+are approved and published:
+
+| Identifier | Title | Read-only | Idempotent | Required scope |
+|---|---|---|---|---|
+| `get-flight-gear-offer` | View flight-linked gear offer | Yes | Yes | `shop:cart` |
+| `claim-flight-gear-offer` | Claim flight-linked gear offer | No | Yes | `shop:cart` |
+| `add-flight-gear-kit` | Add flight-linked gear kit | No | Yes | `shop:cart` |
+
+All accept only required string `booking_id` (the `BK_` confirmation reference).
+Descriptions must distinguish reading, explicitly claiming, and explicitly
+adding the kit; never claim or add automatically after a booking or search.
+Use non-destructive/open-world annotations and disable **Collect user intent**
+so no undeclared argument reaches the handlers.
+
+Use the existing `check-booking` EDS widget and canonical `llmapp-embed.js`,
+with its existing resource/connect domains. Allow redirect origin
+`https://wknd-adventures.run.place` for the optional **Shop your kit** link,
+including on Check Booking's widget configuration. The browser uses SDK tool
+calls only, never a Commerce token or direct financial API request.
+Enable required authentication with `shop:cart` in **both** workspaces for all
+three new tools. Preserve existing Check Booking's `bookings:read` and all
+existing provider/scopes/secrets. Existing Commerce shopper delegation is reused;
+no new booking-write permission or credential is needed.
+
+Commerce must first publish the protected-Aero empty-cart completion update.
+It permits a claimed flight kit to start from an empty cart while ordinary
+bundle suggestions remain partial-cart-only. The existing atomic operation
+retains its stock, winner, expiry and revision checks. Publish the updated EDS
+widget, configure the new tools, then deploy/accept Stage before Production.
 
 Publish the authored EDS widget page and configure UI metadata before enabling
 the feature. UI deployment requires main; select and verify **Stage** explicitly
