@@ -16,7 +16,8 @@ const MCP_RESOURCE = 'https://28538-wkndsherpa.adobeio-static.net/api/v1/web/llm
 const IDENTITY_ISSUER = 'https://dev-g4kzp3zwgwzs8oha.us.auth0.com/';
 const SHOP_SCOPE = 'shop:cart';
 const DELEGATION_AUDIENCE = 'urn:wknd-commerce:storefront';
-const DEFAULT_GRAPHQL_URL = 'https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce/storefront-graphql';
+const LEGACY_GRAPHQL_URL = 'https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce/storefront-graphql';
+const DEFAULT_GRAPHQL_URL = 'https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce-aero/storefront-graphql';
 const PERSON_ENDPOINT = 'https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce/target-diagnostic';
 const PERSON_FRESHNESS_MS = 300000;
 const DM_ASSET_PREFIX = /^https:\/\/delivery-p\d+-e\d+\.adobeaemcloud\.com\/adobe\/assets\/urn:aaid:aem:[0-9a-f-]+$/i;
@@ -112,7 +113,8 @@ function graphqlUrl(extra) {
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
     throw new ShopError(503, 'shop_configuration_error', 'Shop access is not configured: WKND_COMMERCE_GRAPHQL_URL must be an HTTPS URL.');
   }
-  return url.href;
+  // The private binding shares Commerce state/auth and supplies flight-offer verification inputs.
+  return url.href === LEGACY_GRAPHQL_URL ? DEFAULT_GRAPHQL_URL : url.href;
 }
 
 /**
