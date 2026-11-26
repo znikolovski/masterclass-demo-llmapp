@@ -79,6 +79,40 @@ describe('flight-linked gear offer tools', () => {
     expect(query).not.toMatch(/customerCart|addProducts|placeOrder|coupon/i);
   });
 
+  test.each([
+    undefined,
+    'https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce/storefront-graphql',
+    'https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce-aero/storefront-graphql',
+  ])('reads an Aero-claimed offer through the enabled binding with URL %s', async (url) => {
+    const context = shopper();
+    if (url) context.variables.WKND_COMMERCE_GRAPHQL_URL = url;
+    fakeCommerce({ WkndAeroBundleOffer: () => ({ data: { wkndAeroBundleOffer: offer('CLAIMED') } }) });
+    expect((await read({ booking_id: bookingId }, context)).structuredContent.offer.status).toBe('CLAIMED');
+    expect(global.fetch.calls[0].url).toBe('https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce-aero/storefront-graphql');
+  });
+
+  test('preserves explicitly configured noncanonical Commerce endpoints', async () => {
+    const context = shopper();
+    context.variables.WKND_COMMERCE_GRAPHQL_URL = 'https://commerce.example/storefront-graphql';
+    fakeCommerce({ WkndAeroBundleOffer: () => ({ data: { wkndAeroBundleOffer: offer('CLAIMED') } }) });
+    await read({ booking_id: bookingId }, context);
+    expect(global.fetch.calls[0].url).toBe(context.variables.WKND_COMMERCE_GRAPHQL_URL);
+  });
+
+  test('reports a disabled offer service as configuration failure, not shopper ineligibility', async () => {
+    fakeCommerce({
+      WkndAeroBundleOffer: () => ({
+        data: { wkndAeroBundleOffer: {
+          status: 'INELIGIBLE', reason: 'OFFER_DISABLED', booking_id: bookingId, components: [],
+        } },
+      }),
+    });
+    expect(await read({ booking_id: bookingId }, shopper())).toMatchObject({
+      isError: true,
+      structuredContent: { error: { status: 503, code: 'flight_offer_configuration_error' } },
+    });
+  });
+
   test.each(['INELIGIBLE', 'REDEEMED'])('does not present %s as a successful claim', async (status) => {
     fakeCommerce({
       ClaimWkndAeroBundleOffer: () => ({ data: { claimWkndAeroBundleOffer: offer(status) } }),
@@ -150,6 +184,8 @@ describe('flight-linked gear offer tools', () => {
     expect(global.fetch.calls.at(-1).variables).toEqual({
       cartId: 'masked-cart-id', promotionId: 'prm_test', bundleId: 'bundle_test', expected: 'v1',
     });
+    expect(global.fetch.calls.every((call) => call.url
+      === 'https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce-aero/storefront-graphql')).toBe(true);
     expect(result.content[0].text).toMatch(/Total: A\$150\.00/);
   });
 

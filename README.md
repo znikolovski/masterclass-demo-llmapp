@@ -201,7 +201,19 @@ no new booking-write permission or credential is needed.
 Commerce must first publish the protected-Aero empty-cart completion update.
 It permits a claimed flight kit to start from an empty cart while ordinary
 bundle suggestions remain partial-cart-only. The existing atomic operation
-retains its stock, winner, expiry and revision checks. Publish the updated EDS
+retains its stock, winner, expiry and revision checks.
+
+All Commerce requests use the offer-enabled same-namespace binding at
+`https://28538-wkndcommerce.adobeioruntime.net/api/v1/web/commerce-aero/storefront-graphql`.
+It inherits the original Commerce authentication and persistence while supplying
+the private flight-verification inputs. The original canonical
+`commerce/storefront-graphql` URL, including an existing UI variable set to that
+exact URL, is migrated to this binding; explicitly configured other endpoints
+are unchanged. Keep lookup, cart prices and atomic completion on the same route.
+`OFFER_DISABLED` is a service configuration error, not evidence that a shopper's
+confirmed booking or previously saved claim is ineligible.
+
+Publish the updated EDS
 widget, configure the new tools, then deploy/accept Stage before Production.
 
 Publish the authored EDS widget page and configure UI metadata before enabling

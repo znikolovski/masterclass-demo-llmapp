@@ -52,6 +52,9 @@ async function flightOffer(args, extra, claim = false) {
   const { data, errors } = await graphql(extra, query, { bookingId: args.booking_id }, { shopper });
   ensureNoErrors(errors, 'The flight-linked gear offer could not be confirmed. Check its status before retrying.');
   const offer = projectOffer(data[root], args.booking_id);
+  if (offer.reason === 'OFFER_DISABLED') {
+    throw new ShopError(503, 'flight_offer_configuration_error', 'Flight-linked offer access is not configured correctly. Your saved offer could not be checked; this does not mean your booking is ineligible. No gear was added.');
+  }
   let message;
   if (offer.status === 'ELIGIBLE') {
     message = 'Your flight-linked gear offer is available. Claim it only after your explicit confirmation.';
