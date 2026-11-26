@@ -169,17 +169,24 @@ immediately, including for text-only hosts. No local 50% calculation is used.
 Create these UI-managed tools after the source/website and Commerce update
 are approved and published:
 
-| Identifier | Title | Read-only | Idempotent | Required scope |
-|---|---|---|---|---|
-| `get-flight-gear-offer` | View flight-linked gear offer | Yes | Yes | `shop:cart` |
-| `claim-flight-gear-offer` | Claim flight-linked gear offer | No | Yes | `shop:cart` |
-| `add-flight-gear-kit` | Add flight-linked gear kit | No | Yes | `shop:cart` |
+| Identifier | Title | Read-only | Idempotent | Required scope | Visibility |
+|---|---|---|---|---|---|
+| `get-flight-gear-offer` | View flight-linked gear offer | Yes | Yes | `shop:cart` | Model and widget |
+| `claim-flight-gear-offer` | Claim flight-linked gear offer | No | Yes | `shop:cart` | Widget only |
+| `add-flight-gear-kit` | Add flight-linked gear kit | No | Yes | `shop:cart` | Widget only |
 
 All accept only required string `booking_id` (the `BK_` confirmation reference).
 Descriptions must distinguish reading, explicitly claiming, and explicitly
 adding the kit; never claim or add automatically after a booking or search.
 Use non-destructive/open-world annotations and disable **Collect user intent**
 so no undeclared argument reaches the handlers.
+
+Keep **Show as widget in app surface** enabled for all three actions. Disable
+**Expose to AI model** for claim and add, following the existing demo-order
+action's app-only pattern. They are separate backend operations behind explicit
+buttons in one booking widget, not independent model-selected discount flows.
+Visibility is an interaction guard, not authorization: Commerce still requires
+an owned confirmed booking to claim and a valid saved claim before adding gear.
 
 Use the existing `check-booking` EDS widget and canonical `llmapp-embed.js`,
 with its existing resource/connect domains. Allow redirect origin
